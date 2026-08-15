@@ -16,6 +16,7 @@ members = [
     "crates/rpt-text",
     "crates/rpt-render",
     "apps/rpt-render-cli",
+    "apps/rpt-preview",
     "crates/rpt-render-pdf",
     "crates/rpt-db-postgres",
     "crates/rpt-db-sqlite",
@@ -111,6 +112,8 @@ cosmic-text = "0.19"
 krilla = { version = "0.8.2", default-features = false }
 harfrust = "0.5"
 postgres = "0.19"
+# Minimal synchronous HTTP server for the local preview app (`apps/rpt-preview`).
+tiny_http = "0.12"
 rusqlite = "0.32"
 sea-query = { version = "0.32", default-features = false }
 similar = "3"

@@ -1,0 +1,23 @@
+[package]
+name = "rpt-preview"
+description = "A local preview web app: pick a .rpt from a folder, render its saved data to PDF in the browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities"]
+rust-version.workspace = true
+
+[[bin]]
+name = "rpt-preview"
+path = "src/main.rs"
+
+[dependencies]
+rpt-render = { workspace = true }
+tiny_http = { workspace = true }
+
+[lints]
+workspace = true
