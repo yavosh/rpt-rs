@@ -171,7 +171,7 @@ impl<'a> Formatter<'a> {
                     currency = mark;
                     text
                 },
-                font_of(&f.font_color.font),
+                self.spec(&f.font_color.font),
                 cond_color(&f.font_color.condition_formulas, cond::FONT_COLOR, ctx)
                     .unwrap_or(f.font_color.color),
                 ObjectKind::Field,
@@ -180,7 +180,7 @@ impl<'a> Formatter<'a> {
             ),
             ReportObjectKind::Text(t) => (
                 text_display(self.report, t, ctx, state, &self.locale, &self.diagnostics),
-                font_of(&t.font_color.font),
+                self.spec(&t.font_color.font),
                 cond_color(&t.font_color.condition_formulas, cond::FONT_COLOR, ctx)
                     .unwrap_or(t.font_color.color),
                 ObjectKind::Text,
@@ -191,7 +191,7 @@ impl<'a> Formatter<'a> {
             // no row), drawn with its own font/color, so it resolves like a text object.
             ReportObjectKind::FieldHeading(h) => (
                 h.text.clone(),
-                font_of(&h.font_color.font),
+                self.spec(&h.font_color.font),
                 cond_color(&h.font_color.condition_formulas, cond::FONT_COLOR, ctx)
                     .unwrap_or(h.font_color.color),
                 ObjectKind::Text,
@@ -261,6 +261,7 @@ impl<'a> Formatter<'a> {
             // line pitch, and ascent.
             let para_font = para
                 .and_then(paragraph_font)
+                .map(|f| self.gdi_spec(f))
                 .unwrap_or_else(|| font.clone());
             let line_height = Twips(line_pitch(
                 indent.line_spacing,
@@ -340,6 +341,21 @@ impl<'a> Formatter<'a> {
     ///
     /// `underlay_end` names the companion band that would close an underlay span opened here (see
     /// [`Self::open_underlay`]); `None` for a band whose kind has no companion.
+    /// `font_of` plus, under `--font-scale gdi`, the resolved face's GDI cell-height factor
+    /// (see [`rpt_pages::TextLayout::gdi_scale`]) — applied before layout so measuring, wrapping,
+    /// and the drawn size agree.
+    fn spec(&self, f: &rpt_model::Font) -> FontSpec {
+        self.gdi_spec(font_of(f))
+    }
+
+    /// Apply the per-face GDI scale to an already-built [`FontSpec`].
+    fn gdi_spec(&self, mut s: FontSpec) -> FontSpec {
+        if crate::gdi_font_scaling() {
+            s.size_pt = (f64::from(s.size_pt) * self.text_layout.gdi_scale(&s)) as f32;
+        }
+        s
+    }
+
     /// Whether a group band AREA is hidden for this instance: the area-level static suppress, or
     /// its `Section_Visibility` condition evaluating true against the instance's probe record.
     fn area_hidden(&mut self, area: &Area, row: Option<&Row>, state: &ResolveState) -> bool {

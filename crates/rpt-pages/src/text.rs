@@ -22,6 +22,14 @@ pub trait TextLayout: std::fmt::Debug {
     /// Width of a single line of `text` in `font`, in twips.
     fn width_twips(&self, text: &str, font: &FontSpec) -> f64;
 
+    /// The GDI cell-height scale for `font`: `unitsPerEm / (usWinAscent + usWinDescent)` of the
+    /// face that resolves it — the factor Crystal's PDF export applies to a stored point size
+    /// (GDI's positive-`lfHeight` convention sizes the whole cell, not the em). Default `1.0`
+    /// (no face knowledge); the cosmic-backed layout overrides with real OS/2 metrics.
+    fn gdi_scale(&self, _font: &FontSpec) -> f64 {
+        1.0
+    }
+
     /// A line's height in twips (font size × leading). Default: 1.2× the em; a real impl overrides
     /// with the font's ascent+descent+line-gap.
     fn line_height_twips(&self, font: &FontSpec) -> f64 {

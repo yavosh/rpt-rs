@@ -133,6 +133,8 @@ pub struct CosmicLayout {
     known_families: HashSet<String>,
     /// Memoized `(line_height_twips, ascent_twips)` per [`FontKey`], computed lazily on first use.
     metrics_cache: RefCell<HashMap<FontKey, (f64, f64)>>,
+    /// Memoized per-face GDI cell-height scales (see [`TextLayout::gdi_scale`]).
+    gdi_cache: RefCell<HashMap<FontKey, f64>>,
 }
 
 impl std::fmt::Debug for CosmicLayout {
@@ -154,6 +156,7 @@ impl CosmicLayout {
             font_system: RefCell::new(font_system),
             known_families,
             metrics_cache: RefCell::new(HashMap::new()),
+            gdi_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -224,6 +227,30 @@ impl CosmicLayout {
         Some((m.units_per_em, m.ascent, m.descent, m.leading))
     }
 
+    /// The face-resolved GDI cell-height scale: `unitsPerEm / (usWinAscent + usWinDescent)` from
+    /// the OS/2 table of the face that actually renders `font`. `None` when the face cannot be
+    /// resolved, parsed, or carries no OS/2 win metrics.
+    fn resolved_gdi_scale(&self, font: &FontSpec) -> Option<f64> {
+        let font_id = self
+            .shaped("x", font, None)
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .map(|g| g.font_id)
+            .next()?;
+        let weight = if font.bold {
+            cosmic_text::fontdb::Weight::BOLD
+        } else {
+            cosmic_text::fontdb::Weight::NORMAL
+        };
+        let resolved = self.font_system.borrow_mut().get_font(font_id, weight)?;
+        let face = ttf_parser::Face::parse(resolved.data(), 0).ok()?;
+        let upm = f64::from(face.units_per_em());
+        let os2 = face.tables().os2?;
+        let cell = f64::from(os2.windows_ascender().unsigned_abs())
+            + f64::from(os2.windows_descender().unsigned_abs());
+        (cell > 0.0 && upm > 0.0).then(|| upm / cell)
+    }
+
     /// Memoized `(line_height_twips, ascent_twips)` for `font`. The first call per [`FontKey`] shapes
     /// a probe glyph to resolve the face; subsequent calls hit the cache. Values are identical to
     /// computing them directly — this is pure memoization of an expensive per-`FontSpec` resolution.
@@ -262,6 +289,16 @@ impl TextLayout for CosmicLayout {
             .map(|run| run.line_w)
             .fold(0.0f32, f32::max);
         width_pt as f64 * TWIPS_PER_PT
+    }
+
+    fn gdi_scale(&self, font: &FontSpec) -> f64 {
+        let key = FontKey::new(font);
+        if let Some(&cached) = self.gdi_cache.borrow().get(&key) {
+            return cached;
+        }
+        let scale = self.resolved_gdi_scale(font).unwrap_or(1.0);
+        self.gdi_cache.borrow_mut().insert(key, scale);
+        scale
     }
 
     fn line_height_twips(&self, font: &FontSpec) -> f64 {

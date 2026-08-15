@@ -938,6 +938,16 @@ pub(crate) fn translate_op(op: &DrawOp, dx: i32, dy: i32, id_offset: u32) -> Dra
 /// glyphs by the GDI cell-height convention — the stored point size is the full line cell, so the
 /// drawn em is `size / (ascent+descent+linegap)/em` ≈ `size × 0.87` for Arial-class faces. Stating
 /// `RPT_FONT_SCALE=0.87` (the CLI's `--font-scale`) reproduces those exports.
+/// Whether `RPT_FONT_SCALE=gdi` selects the per-face GDI cell-height rule (applied through
+/// [`rpt_pages::TextLayout::gdi_scale`] where the layout holds the resolved faces) instead of a
+/// flat factor.
+pub(crate) fn gdi_font_scaling() -> bool {
+    static GDI: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GDI.get_or_init(|| {
+        std::env::var("RPT_FONT_SCALE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("gdi"))
+    })
+}
+
 pub(crate) fn font_scale() -> f64 {
     static SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *SCALE.get_or_init(|| {
