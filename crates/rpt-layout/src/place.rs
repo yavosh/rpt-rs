@@ -407,12 +407,19 @@ impl Formatter<'_> {
         // the row taller the shading/frame tracks the actual rendered height instead of covering
         // only the top slice, preserving its distance from the band bottom.
         let rect = if self.spans_sections(b.shape.end_section_index, at.section_name) {
-            self.span_rect(
+            let mut r = self.span_rect(
                 rect,
                 at.section_name,
                 b.shape.end_section_index,
                 obj.bounds.top.0,
-            )
+            );
+            // A box spanning past this page is sliced at the page body (the page-footer top),
+            // closing the slice's bottom edge there — the engine redraws the box from the next
+            // page's repeated band, so each page carries one closed slice.
+            if r.top.0 + r.height.0 > self.body_bottom {
+                r.height = Twips((self.body_bottom - r.top.0).max(0));
+            }
+            r
         } else {
             extend_section_box(rect, &obj.bounds, at.band_height, at.section_design_height)
         };
