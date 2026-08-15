@@ -453,7 +453,15 @@ pub fn cond_bool(
     let ctx = ctx?;
     let body = conditions.iter().find(|(k, _)| k == key).map(|(_, b)| b)?;
     let ast = parse_cached(body);
-    match rpt_formula::eval::eval(&ast.node, ctx).ok()? {
+    let result = rpt_formula::eval::eval(&ast.node, ctx);
+    if std::env::var_os("RPT_DEBUG_COND").is_some() {
+        eprintln!(
+            "COND {key} => {:?}   [{}]",
+            result,
+            body.chars().take(70).collect::<String>().replace('\n', " ")
+        );
+    }
+    match result.ok()? {
         Value::Bool(b) => Some(b),
         _ => None,
     }

@@ -484,8 +484,9 @@ fn convert(value_type: FieldValueType, cell: Option<&Cell>) -> Value {
             .and_then(|t| parse_datetime_cell(t))
             .map(|(d, t)| Value::DateTime(d, t))
             .unwrap_or_else(|| str_or_null(cell)),
-        // String / memo / blob stored as text: absent = empty string.
-        _ => Value::Str(cell.cloned().unwrap_or_default()),
+        // String / memo / blob stored as text. An absent cell is NULL, not an empty string — the
+        // engine's `IsNull({field})` and null-propagation semantics hinge on the difference.
+        _ => cell.map(|t| Value::Str(t.clone())).unwrap_or(Value::Null),
     }
 }
 

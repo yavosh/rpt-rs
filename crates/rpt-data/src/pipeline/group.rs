@@ -25,6 +25,22 @@ pub(super) fn build_groups(
     let Some(group) = groups.get(level) else {
         return Vec::new();
     };
+    if !group.hierarchical.is_empty() {
+        // A specified-order ("in specified order") group: rows go to the first named group whose
+        // stored condition holds, and the groups print in the stored list order.
+        return arrange_hierarchy(
+            apply_group_topn(
+                build_specified_groups(rows, groups, level, group, summaries, formulas, params, sink),
+                group,
+                level,
+                summaries,
+                formulas,
+                params,
+                sink,
+            ),
+            group,
+        );
+    }
     if let Some(cond) = group.date_condition {
         // A boolean condition is order-sensitive (a transition / look-ahead break over the ordered
         // rows), not a value bucket, so it takes a dedicated sequential path rather than the
@@ -76,15 +92,18 @@ pub(super) fn build_groups(
 
     // Sort the group instances by the group's sort direction (on the key). `a`/`b` come from
     // `order`, which only ever holds keys inserted into `buckets`, so the lookups cannot miss.
-    order.sort_by(|a, b| {
-        let ka = &buckets.get(a).expect("order key is a bucket key").0;
-        let kb = &buckets.get(b).expect("order key is a bucket key").0;
-        let ord = compare_values(ka, kb);
-        match group.sort.direction {
-            SortDirection::DescendingOrder => ord.reverse(),
-            _ => ord,
-        }
-    });
+    // `NoSortOrder` is Crystal's "in original order": the groups keep first-appearance order.
+    if group.sort.direction != SortDirection::NoSortOrder {
+        order.sort_by(|a, b| {
+            let ka = &buckets.get(a).expect("order key is a bucket key").0;
+            let kb = &buckets.get(b).expect("order key is a bucket key").0;
+            let ord = compare_values(ka, kb);
+            match group.sort.direction {
+                SortDirection::DescendingOrder => ord.reverse(),
+                _ => ord,
+            }
+        });
+    }
 
     let instances: Vec<GroupInstance> = order
         .into_iter()
@@ -124,6 +143,107 @@ pub(super) fn build_groups(
         apply_group_topn(instances, group, level, summaries, formulas, params, sink),
         group,
     )
+}
+
+/// Partition `rows` into a **specified-order** group level: each row joins the first stored named
+/// group whose condition formula evaluates true for it, and the group instances print in the
+/// stored list order (empty named groups are skipped). Rows matching no condition trail behind the
+/// named groups in their own raw-key groups, first-seen — Crystal's "each in its own group"
+/// leftover handling.
+#[allow(clippy::too_many_arguments)]
+fn build_specified_groups(
+    rows: &[Row],
+    groups: &[Group],
+    level: usize,
+    group: &Group,
+    summaries: &[SummaryDef],
+    formulas: &FormulaRegistry,
+    params: &Parameters,
+    sink: Option<&dyn DiagnosticSink>,
+) -> Vec<GroupInstance> {
+    use rpt_formula::eval::vm;
+    use rpt_formula::{parse, Syntax};
+    let compiled: Vec<(&str, vm::Chunk)> = group
+        .hierarchical
+        .iter()
+        .map(|h| {
+            (
+                h.value_name.as_str(),
+                vm::compile(&parse(&h.condition, Syntax::Crystal).0),
+            )
+        })
+        .collect();
+
+    let mut named: Vec<Vec<Row>> = vec![Vec::new(); compiled.len()];
+    let mut other_order: Vec<String> = Vec::new();
+    let mut others: std::collections::HashMap<String, (Value, Vec<Row>)> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let mut ctx = DataContext::new(row, formulas).with_params(params);
+        if let Some(sink) = sink {
+            ctx = ctx.with_diagnostics(sink);
+        }
+        let hit = compiled
+            .iter()
+            .position(|(_, chunk)| matches!(vm::run(chunk, &ctx), Ok(Value::Bool(true))));
+        match hit {
+            Some(i) => named[i].push(row.clone()),
+            None => {
+                let key_val = group_key(row, &group.condition_field, formulas, params, sink);
+                let key_str = value_key(&key_val);
+                others
+                    .entry(key_str.clone())
+                    .or_insert_with(|| {
+                        other_order.push(key_str.clone());
+                        (key_val, Vec::new())
+                    })
+                    .1
+                    .push(row.clone());
+            }
+        }
+    }
+
+    let make = |key: Value, bucket: Vec<Row>| {
+        let subgroups = build_groups(
+            &bucket,
+            groups,
+            level + 1,
+            summaries,
+            formulas,
+            params,
+            sink,
+        );
+        let group_summaries = summarize(&bucket, summaries, formulas, params);
+        let details = if subgroups.is_empty() {
+            bucket
+        } else {
+            Vec::new()
+        };
+        GroupInstance {
+            level,
+            condition_field: group.condition_field.clone(),
+            key,
+            date_condition: group.date_condition,
+            summaries: group_summaries,
+            subgroups,
+            details,
+            hierarchy_children: Vec::new(),
+        }
+    };
+
+    let mut instances = Vec::new();
+    for ((name, _), bucket) in compiled.iter().zip(named) {
+        if !bucket.is_empty() {
+            instances.push(make(Value::Str(name.to_string()), bucket));
+        }
+    }
+    for key_str in other_order {
+        let (key, bucket) = others
+            .remove(&key_str)
+            .expect("other_order holds only keys inserted into others");
+        instances.push(make(key, bucket));
+    }
+    instances
 }
 
 /// Rearrange a hierarchically grouped level's flat instance list into the parent/child tree Crystal

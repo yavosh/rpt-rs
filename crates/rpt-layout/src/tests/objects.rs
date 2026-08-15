@@ -627,20 +627,23 @@ fn group_footers_pair_to_header_levels_by_name_not_position() {
         footer_section("nameFooter"),
         footer_section("orderdateFooter"),
     ];
+    let area = rpt_model::Area::default();
     let footer_entries = vec![
         (
             crate::group_area_key("nameFooter", "Footer"),
             vec![&secs[0]],
+            &area,
         ),
         (
             crate::group_area_key("orderdateFooter", "Footer"),
             vec![&secs[1]],
+            &area,
         ),
     ];
     let ordered = crate::order_group_footers(&header_keys, footer_entries);
-    assert_eq!(ordered[0][0].name, "nameFooter", "level 0 = region footer");
+    assert_eq!(ordered[0].0[0].name, "nameFooter", "level 0 = region footer");
     assert_eq!(
-        ordered[1][0].name, "orderdateFooter",
+        ordered[1].0[0].name, "orderdateFooter",
         "level 1 = month footer"
     );
 }
@@ -659,24 +662,28 @@ fn group_footers_pair_across_digit_suffixes_regardless_of_order() {
         footer_section("nameFooter1"),
         footer_section("nameFooter"),
     ];
+    let area = rpt_model::Area::default();
     let footer_entries = vec![
         (
             crate::group_area_key("nameFooter2", "Footer"),
             vec![&secs[0]],
+            &area,
         ),
         (
             crate::group_area_key("nameFooter1", "Footer"),
             vec![&secs[1]],
+            &area,
         ),
         (
             crate::group_area_key("nameFooter", "Footer"),
             vec![&secs[2]],
+            &area,
         ),
     ];
     let ordered = crate::order_group_footers(&header_keys, footer_entries);
-    assert_eq!(ordered[0][0].name, "nameFooter");
-    assert_eq!(ordered[1][0].name, "nameFooter1");
-    assert_eq!(ordered[2][0].name, "nameFooter2");
+    assert_eq!(ordered[0].0[0].name, "nameFooter");
+    assert_eq!(ordered[1].0[0].name, "nameFooter1");
+    assert_eq!(ordered[2].0[0].name, "nameFooter2");
 }
 
 #[test]
@@ -687,12 +694,13 @@ fn group_footers_fall_back_to_reverse_when_names_do_not_pair() {
         .map(|n| crate::group_area_key(n, "Header"))
         .collect::<Vec<_>>();
     let secs = [footer_section("xFooter"), footer_section("yFooter")];
+    let area = rpt_model::Area::default();
     let footer_entries = vec![
-        (crate::group_area_key("xFooter", "Footer"), vec![&secs[0]]),
-        (crate::group_area_key("yFooter", "Footer"), vec![&secs[1]]),
+        (crate::group_area_key("xFooter", "Footer"), vec![&secs[0]], &area),
+        (crate::group_area_key("yFooter", "Footer"), vec![&secs[1]], &area),
     ];
     let ordered = crate::order_group_footers(&header_keys, footer_entries);
     // Reversed input order.
-    assert_eq!(ordered[0][0].name, "yFooter");
-    assert_eq!(ordered[1][0].name, "xFooter");
+    assert_eq!(ordered[0].0[0].name, "yFooter");
+    assert_eq!(ordered[1].0[0].name, "xFooter");
 }

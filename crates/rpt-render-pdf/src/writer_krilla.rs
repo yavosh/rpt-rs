@@ -959,6 +959,18 @@ fn place_glyphs(
         };
         let seg_text = &t.text[seg.range.clone()];
         let (glyphs, advance) = shaper.shape(seg_text, size, spacing);
+        if std::env::var_os("RPT_DEBUG_TEXT").is_some() && t.text.contains("INSURERS") {
+            eprintln!(
+                "TEXT seg {:?} shaped_advance_pt={advance} pen_start={} box_left_pt={} box_w_pt={} measured_advance={:?} align={:?} sub={}",
+                seg_text,
+                pen_x,
+                pt(t.bounds.left.0),
+                pt(t.bounds.width.0),
+                t.metrics.map(|m| pt(m.advance.0)),
+                t.align,
+                seg.substituted,
+            );
+        }
         if !glyphs.is_empty() {
             surface.draw_glyphs(
                 Point::from_xy(pen_x, origin.y),

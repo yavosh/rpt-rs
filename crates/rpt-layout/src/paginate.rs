@@ -9,7 +9,7 @@ use crate::{
 };
 use rpt_data::{DataContext, GroupInstance, Row};
 use rpt_model::{
-    LineSpacing, Paragraph, ReadingOrder, ReportObject, ReportObjectKind, Section, Twips,
+    Area, LineSpacing, Paragraph, ReadingOrder, ReportObject, ReportObjectKind, Section, Twips,
 };
 use rpt_pages::{FontSpec, ObjectKind, Page, PageCheckpoint, TextAlign, TextLayout};
 use std::rc::Rc;
@@ -340,6 +340,40 @@ impl<'a> Formatter<'a> {
     ///
     /// `underlay_end` names the companion band that would close an underlay span opened here (see
     /// [`Self::open_underlay`]); `None` for a band whose kind has no companion.
+    /// Whether a group band AREA is hidden for this instance: the area-level static suppress, or
+    /// its `Section_Visibility` condition evaluating true against the instance's probe record.
+    fn area_hidden(&mut self, area: &Area, row: Option<&Row>, state: &ResolveState) -> bool {
+        if area.format.base.suppress {
+            return true;
+        }
+        if area.condition_formulas.is_empty() {
+            return false;
+        }
+        let empty = Row::default();
+        let probe = self.context(row.unwrap_or(&empty), state);
+        crate::resolve::cond_bool(
+            &area.condition_formulas,
+            crate::resolve::cond::SECTION_VISIBILITY,
+            Some(&probe),
+        )
+        .unwrap_or(false)
+    }
+
+    /// Whether a group-header AREA asks for a page break ahead of this instance ("New Page
+    /// Before", static or conditional).
+    fn area_breaks_before(&mut self, area: &Area, row: Option<&Row>, state: &ResolveState) -> bool {
+        if area.format.base.new_page_before {
+            return true;
+        }
+        if area.condition_formulas.is_empty() {
+            return false;
+        }
+        let empty = Row::default();
+        let probe = self.context(row.unwrap_or(&empty), state);
+        crate::resolve::cond_bool(&area.condition_formulas, "New_Page_Before", Some(&probe))
+            .unwrap_or(false)
+    }
+
     pub(crate) fn emit_band(
         &mut self,
         section: &Section,
@@ -714,11 +748,22 @@ impl<'a> Formatter<'a> {
         let key = Some(g.key.clone());
         let mut state = self.state(key.clone());
         state.summaries = Rc::new(g.summaries.clone());
-        // Group header for this level.
+        // Group header for this level. The header AREA's own format applies to the whole band per
+        // group instance: an area-level suppress (static or conditional) hides every section, and
+        // "New Page Before" breaks the page ahead of the instance (unless it is already at the top).
         if let Some(hdr) = self.bands.group_headers.get(g.level).cloned() {
             let first = g.details.first().or_else(|| first_row(g));
-            for s in hdr {
-                self.emit_band(s, first, &state, Some(UnderlayEnd::GroupFooter(g.level)));
+            let area = self.bands.group_header_areas.get(g.level).copied();
+            if area.map(|a| self.area_hidden(a, first, &state)) != Some(true) {
+                if area.map(|a| self.area_breaks_before(a, first, &state)) == Some(true)
+                    && self.cursor_y > 0
+                {
+                    self.finish_page();
+                    self.begin_page();
+                }
+                for s in hdr {
+                    self.emit_band(s, first, &state, Some(UnderlayEnd::GroupFooter(g.level)));
+                }
             }
         }
         // Children: subgroups or detail rows.
@@ -747,8 +792,16 @@ impl<'a> Formatter<'a> {
         self.close_underlay_spans(UnderlayEnd::GroupFooter(g.level));
         if let Some(ftr) = self.bands.group_footers.get(g.level).cloned() {
             let last = g.details.last().or_else(|| crate::last_row(g));
-            for s in ftr {
-                self.emit_band(s, last, &state, None);
+            let area = self
+                .bands
+                .group_footer_areas
+                .get(g.level)
+                .copied()
+                .flatten();
+            if area.map(|a| self.area_hidden(a, last, &state)) != Some(true) {
+                for s in ftr {
+                    self.emit_band(s, last, &state, None);
+                }
             }
         }
         self.group_stack.pop();

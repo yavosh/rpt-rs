@@ -171,6 +171,9 @@ PARAMETERS:
 LOCALE:
         --locale <tag>     locale for date/number formatting (e.g. en-US, de-DE). Default: the host
                            locale (LC_ALL/LC_NUMERIC/LANG), else en-US.
+        --datetime-to-date render DateTime database fields as dates (the report option 'convert
+                           date-time field: to Date' of legacy CR8-upgraded reports, which the
+                           reader does not yet decode from the file).
 
 FONTS (default: the bundled Liberation/DejaVu faces, so the render is reproducible on any machine):
         --system-fonts     lay out and embed the host's installed faces instead. Use it when the
@@ -342,6 +345,9 @@ struct Cli {
     /// `--system-fonts`: take both halves of the font stack (layout metrics + embedded faces) from the
     /// host's installed library instead of the bundled faces.
     system_fonts: bool,
+    /// `--datetime-to-date`: render DateTime database fields as dates (the report option "convert
+    /// date-time field: to Date" that legacy CR8-upgraded reports carry, not yet decoded from the file).
+    datetime_to_date: bool,
     /// `--pdfa <level>` / `--pdfua`: the archival or accessibility standard to export against,
     /// checked at serialization time. Default [`rpt_render::Conformance::None`] — an ordinary PDF.
     conformance: rpt_render::Conformance,
@@ -562,6 +568,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Cli>, String>
     let mut verbose = false;
     let mut quiet = false;
     let mut system_fonts = false;
+    let mut datetime_to_date = false;
     let mut pdfa: Option<rpt_render::Conformance> = None;
     let mut pdfua = false;
     let mut tagged = false;
@@ -595,6 +602,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Cli>, String>
                 }
             }
             "--locale" => locale = Some(take("--locale")?),
+            // Crystal's own PDF export draws glyphs by the GDI cell-height convention (~0.87x the
+            // stored point size for Arial-class faces); stating the factor reproduces those exports.
+            "--font-scale" => std::env::set_var("RPT_FONT_SCALE", take("--font-scale")?),
+            "--datetime-to-date" => datetime_to_date = true,
             "--system-fonts" => system_fonts = true,
             "--pdfa" => pdfa = Some(parse_pdfa(&take("--pdfa")?)?),
             "--pdfua" => pdfua = true,
@@ -677,6 +688,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Cli>, String>
         level,
         list_sources,
         system_fonts,
+        datetime_to_date,
         conformance,
         tagged,
         language,
@@ -933,7 +945,8 @@ fn resolve_locale(cli: &Cli, log: &Log) -> rpt_render::Locale {
     // Resolve the tag, then map it to a built-in render locale (separators + month/day names + AM/PM),
     // merged with each field's stored format at render time.
     let (loc_tag, loc_src) = locale::resolve(cli.locale.as_deref());
-    let render_locale = rpt_render::Locale::from_tag(&loc_tag);
+    let mut render_locale = rpt_render::Locale::from_tag(&loc_tag);
+    render_locale.datetime_to_date = cli.datetime_to_date;
     log.info(
         Comp::Entry,
         format!(
@@ -947,7 +960,7 @@ fn resolve_locale(cli: &Cli, log: &Log) -> rpt_render::Locale {
             Comp::Entry,
             format!(
             "locale {loc_tag:?} is not in the built-in table (en-US, en-GB, de-DE, fr-FR, es-ES, \
-             it-IT); formatting with the en-US fallback"
+             it-IT, el-CY, el-GR); formatting with the en-US fallback"
         ),
         );
     }

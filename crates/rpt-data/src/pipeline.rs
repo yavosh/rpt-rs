@@ -287,7 +287,15 @@ fn build_dataset_inner(
                 let key: Vec<Value> = data_def
                     .record_sorts
                     .iter()
-                    .map(|s| row.get(&s.field).cloned().unwrap_or(Value::Null))
+                    .map(|s| {
+                        // A sort on a formula field (`@name`) keys on the formula's per-row value.
+                        if let Some(name) = s.field.strip_prefix('@') {
+                            let ctx = DataContext::new(&row, &formulas).with_params(params);
+                            group::ctx_formula(&ctx, name)
+                        } else {
+                            row.get(&s.field).cloned().unwrap_or(Value::Null)
+                        }
+                    })
                     .collect();
                 (key, row)
             })

@@ -50,8 +50,8 @@ use rpt_data::{
 };
 use rpt_formula::eval::Value;
 use rpt_model::{
-    field_object_value_type, Alignment, AreaSectionKind, Color, Font, GroupAreaFormat, ImageFormat,
-    ReadingOrder, Report, ReportObject, ReportObjectKind, Section, Twips,
+    field_object_value_type, Alignment, Area, AreaSectionKind, Color, Font, GroupAreaFormat,
+    ImageFormat, ReadingOrder, Report, ReportObject, ReportObjectKind, Section, Twips,
 };
 use rpt_pages::{
     Diagnostic, DrawOp, FontSpec, ImageAsset, ObjectKind, Page, PageCheckpoint, PageSize,
@@ -263,6 +263,12 @@ struct Bands<'a> {
     /// `keep_group_together` and `visible_groups_per_page` — the group-header area's format, since
     /// the section vectors drop it.
     group_formats: Vec<GroupAreaFormat>,
+    /// Each group level's header **area** (parallel to `group_headers`): the area-level format and
+    /// condition formulas (suppress, new-page-before) apply to the whole band per group instance.
+    group_header_areas: Vec<&'a Area>,
+    /// Each group level's footer area (parallel to `group_footers`); `None` when the footers fell
+    /// back to unmatched ordering.
+    group_footer_areas: Vec<Option<&'a Area>>,
     /// The Detail area's "Records per page" cap (`visible_records_per_page`); `0` = no limit.
     records_per_page: i32,
 }
@@ -281,15 +287,16 @@ fn group_area_key(name: &str, token: &str) -> String {
 /// to the canonical assumption that footers are stored innermost-first and reverse them.
 fn order_group_footers<'a>(
     header_keys: &[String],
-    footer_entries: Vec<(String, Vec<&'a Section>)>,
-) -> Vec<Vec<&'a Section>> {
-    let mut placed: Vec<Option<Vec<&Section>>> = (0..header_keys.len()).map(|_| None).collect();
+    footer_entries: Vec<(String, Vec<&'a Section>, &'a Area)>,
+) -> Vec<(Vec<&'a Section>, Option<&'a Area>)> {
+    let mut placed: Vec<Option<(Vec<&Section>, Option<&Area>)>> =
+        (0..header_keys.len()).map(|_| None).collect();
     let mut all_matched = footer_entries.len() == header_keys.len();
     let mut fallback = Vec::with_capacity(footer_entries.len());
-    for (key, sections) in footer_entries {
-        fallback.push(sections.clone());
+    for (key, sections, area) in footer_entries {
+        fallback.push((sections.clone(), Some(area)));
         match header_keys.iter().position(|k| *k == key) {
-            Some(level) if placed[level].is_none() => placed[level] = Some(sections),
+            Some(level) if placed[level].is_none() => placed[level] = Some((sections, Some(area))),
             _ => all_matched = false,
         }
     }
@@ -312,12 +319,14 @@ impl<'a> Bands<'a> {
             report_footer: Vec::new(),
             page_footer: Vec::new(),
             group_formats: Vec::new(),
+            group_header_areas: Vec::new(),
+            group_footer_areas: Vec::new(),
             records_per_page: 0,
         };
         // Group headers appear in group-level order (outermost first); record each level's matching
         // key so its footer can be paired back to it by name, not by position.
         let mut header_keys: Vec<String> = Vec::new();
-        let mut footer_entries: Vec<(String, Vec<&Section>)> = Vec::new();
+        let mut footer_entries: Vec<(String, Vec<&Section>, &Area)> = Vec::new();
         for area in &report.report_definition.areas {
             // "Hide (Drill-Down OK)" hides the whole area in the normal (non-drill-down) render, so it
             // contributes no bands — but its structural bookkeeping (group level, header/footer key,
@@ -334,20 +343,25 @@ impl<'a> Bands<'a> {
                     b.group_formats.push(area.format.group.unwrap_or_default());
                     header_keys.push(group_area_key(&area.name, "Header"));
                     b.group_headers.push(sections);
+                    b.group_header_areas.push(area);
                 }
                 AreaSectionKind::Detail => {
                     b.records_per_page = area.format.visible_records_per_page;
                     b.detail.extend(sections);
                 }
                 AreaSectionKind::GroupFooter => {
-                    footer_entries.push((group_area_key(&area.name, "Footer"), sections));
+                    footer_entries.push((group_area_key(&area.name, "Footer"), sections, area));
                 }
                 AreaSectionKind::ReportFooter => b.report_footer.extend(sections),
                 AreaSectionKind::PageFooter => b.page_footer.extend(sections),
                 _ => {}
             }
         }
-        b.group_footers = order_group_footers(&header_keys, footer_entries);
+        let footers = order_group_footers(&header_keys, footer_entries);
+        for (sections, area) in footers {
+            b.group_footers.push(sections);
+            b.group_footer_areas.push(area);
+        }
         b
     }
 }
@@ -920,6 +934,21 @@ pub(crate) fn translate_op(op: &DrawOp, dx: i32, dy: i32, id_offset: u32) -> Dra
     moved
 }
 
+/// The global font-size scale (default 1.0), from `RPT_FONT_SCALE`. Crystal's own PDF export sizes
+/// glyphs by the GDI cell-height convention — the stored point size is the full line cell, so the
+/// drawn em is `size / (ascent+descent+linegap)/em` ≈ `size × 0.87` for Arial-class faces. Stating
+/// `RPT_FONT_SCALE=0.87` (the CLI's `--font-scale`) reproduces those exports.
+pub(crate) fn font_scale() -> f64 {
+    static SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("RPT_FONT_SCALE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| (0.1..=4.0).contains(v))
+            .unwrap_or(1.0)
+    })
+}
+
 pub(crate) fn font_of(f: &Font) -> FontSpec {
     FontSpec {
         family: if f.name.is_empty() {
@@ -927,7 +956,7 @@ pub(crate) fn font_of(f: &Font) -> FontSpec {
         } else {
             f.name.clone()
         },
-        size_pt: if f.size_pt > 0.0 { f.size_pt } else { 10.0 },
+        size_pt: (if f.size_pt > 0.0 { f.size_pt } else { 10.0 }) * font_scale() as f32,
         bold: f.bold,
         italic: f.italic,
         underline: f.underline,

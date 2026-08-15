@@ -40,6 +40,9 @@ pub fn field_format_spec(
         T::Currency => currency_or_number(fmt, vt, loc, true),
         T::Date => FormatSpec::Date(date_spec(fmt, loc)),
         T::Time => FormatSpec::Time(time_spec(fmt, loc)),
+        // The report option "convert date-time field: to Date" (stated via the locale handle, see
+        // `Locale::datetime_to_date`) narrows a DateTime field to its date half.
+        T::DateTime if loc.datetime_to_date => FormatSpec::Date(date_spec(fmt, loc)),
         T::DateTime => datetime_spec(fmt, loc),
         T::Boolean => FormatSpec::Bool(bool_spec(fmt)),
         _ => FormatSpec::String,

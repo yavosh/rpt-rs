@@ -56,6 +56,14 @@ pub struct Area {
     pub format: AreaFormat,
     /// The sections that make up this area (usually one; groups repeat per instance).
     pub sections: Vec<Section>,
+    /// Conditional-format formulas attached to the **area itself** (the whole band), as
+    /// `(reserved formula name, formula text)` pairs in record order — e.g. a
+    /// `("Section_Visibility", "…")` that hides every section of a group header for some groups.
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip_serializing_if = "Vec::is_empty", default)
+    )]
+    pub condition_formulas: Vec<(String, String)>,
 }
 
 /// SDK: `ISection`.

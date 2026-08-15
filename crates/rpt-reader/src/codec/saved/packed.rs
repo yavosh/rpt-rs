@@ -13,10 +13,13 @@ use super::{batch_failed, SavedRowset};
 /// its buffer's width up to this, and a string beyond it.
 const MAX_SCALAR_WIDTH: usize = 8;
 
-/// A batch's column table holds three values per inline string column, of which the third is the
-/// on-disk offset of the field that follows that column.
+/// A batch's column table holds three values per **batch-present** inline string column: the second
+/// encodes the persistent offset of the next batch-present field after that string (as
+/// `persistent + 1 - value`), and the third is that string's on-disk end offset. A column that is
+/// null in every record of the batch gets no table entry and occupies no on-disk slot.
 const COLUMN_TABLE_STRIDE: usize = 3;
-const COLUMN_NEXT_FIELD_OFFSET: usize = 2;
+const COLUMN_NEXT_PRESENT: usize = 1;
+const COLUMN_END_OFFSET: usize = 2;
 
 /// How a saved inline field is stored on disk in a packed record, from its declared value type:
 /// a variable UTF-16LE string, or a fixed-width little-endian scalar of a given byte size read as a
@@ -144,12 +147,26 @@ fn decode_packed_record(
             continue;
         }
         cells[k] = Some(match kinds.get(k).copied().unwrap_or(PackedField::Str) {
-            PackedField::Int(_) => int_cell_to_string(slot),
-            PackedField::Float(_) => float_cell_to_string(slot),
-            PackedField::Str => decode_utf16z(slot),
+            PackedField::Int(sz) => int_cell_to_string(scalar_payload(slot, sz)),
+            PackedField::Float(sz) => float_cell_to_string(scalar_payload(slot, sz)),
+            // An odd-width string slot carries one leading pad byte ahead of the UTF-16LE data.
+            PackedField::Str => decode_utf16z(slot.get(slot.len() & 1..).unwrap_or(&[])),
         });
     }
     cells
+}
+
+/// The payload bytes of a scalar slot. A slot wider than the scalar's natural size carries a leading
+/// null-flag byte (the persistent width, e.g. 9 for an 8-byte double); a narrower one is the flagged
+/// day-half of a `DateTime` (`[flag][u32]`) — in both cases the payload is the slot's tail.
+fn scalar_payload(slot: &[u8], sz: usize) -> &[u8] {
+    if slot.len() > sz {
+        &slot[slot.len() - sz..]
+    } else if slot.len() < sz && slot.len() > 1 {
+        &slot[1..]
+    } else {
+        slot
+    }
 }
 
 /// Decode a UTF-16LE run up to the first NUL word (the rest of the on-disk slot is zero padding).
@@ -177,9 +194,11 @@ pub(super) fn decode_utf16z(slot: &[u8]) -> String {
 struct PackedBatchLayout {
     count: u32,
     item_size: u32,
-    /// On-disk offset of the field after each string column (the k-th string's slot ends here). The
-    /// last field, if a string, ends at `item_size` instead — its entry here is not used.
-    next_offsets: Vec<usize>,
+    /// Per batch-present compacted string column, in ascending record offset:
+    /// `(next_present, end)` — the persistent offset of the next batch-present field after this
+    /// string, and this string's on-disk end offset. Columns skipped between a string and its
+    /// `next_present` are null in every record of the batch and occupy no on-disk slot.
+    entries: Vec<(usize, usize)>,
 }
 
 /// The packed index batches of a saved-data catalog, each with the per-string boundaries its own
@@ -189,7 +208,7 @@ struct PackedBatchLayout {
 /// report can still carry a trailing directory entry addressing `MemoValuesStream` — vestigial when
 /// that stream is absent — and it is not an index batch: taking it would add its `count` to the
 /// report's record total for rows that do not exist.
-fn packed_index_layouts(catalog: &SavedCatalog) -> Vec<PackedBatchLayout> {
+fn packed_index_layouts(catalog: &SavedCatalog, persistent: usize) -> Vec<PackedBatchLayout> {
     let mut cursor = 0u32;
     catalog
         .batches
@@ -205,10 +224,17 @@ fn packed_index_layouts(catalog: &SavedCatalog) -> Vec<PackedBatchLayout> {
         .map(|b| PackedBatchLayout {
             count: b.desc.count,
             item_size: b.desc.item_size,
-            next_offsets: b
+            entries: b
                 .columns
                 .chunks_exact(COLUMN_TABLE_STRIDE)
-                .map(|triple| triple[COLUMN_NEXT_FIELD_OFFSET] as usize)
+                .map(|triple| {
+                    (
+                        persistent
+                            .saturating_add(1)
+                            .saturating_sub(triple[COLUMN_NEXT_PRESENT] as usize),
+                        triple[COLUMN_END_OFFSET] as usize,
+                    )
+                })
                 .collect(),
         })
         .collect()
@@ -216,24 +242,65 @@ fn packed_index_layouts(catalog: &SavedCatalog) -> Vec<PackedBatchLayout> {
 
 /// Resolve one packed batch's on-disk layout: per-field slot widths, per-field on-disk read kind
 /// (schema order), and the present-bitmap width. Walks fields in ascending record offset carrying an
-/// on-disk cursor `cur`; each field's in-memory (persistent) span width is `pw`.
+/// on-disk cursor `cur` and a persistent-space cursor `cp`; each field's in-memory (persistent) span
+/// width is `pw`.
 ///
-/// A field is a **compacted string** iff the next unconsumed column-table boundary falls within its
-/// persistent span (`next_offsets[si] <= cur + pw`) — a scalar or a fixed short string keeps its
-/// persistent width on disk, so the next boundary (belonging to a later, actually-compacted string)
-/// always lies strictly beyond `cur + pw`. This identifies the compacted columns **structurally from
-/// the table**, so it needs neither the value type nor a matching string count, and — because each
-/// boundary is an absolute on-disk offset — a mistyped scalar width cannot drift past the next
-/// string. The last field always ends at `item_size`. The value type only selects how a
-/// **non-compacted** field is read (scalar vs. fixed short string); a compacted field is always a
-/// string.
+/// Each column-table entry belongs to the next string column at/after `cp`, gives that string's
+/// absolute on-disk end, and advances `cp` to the batch's next present field — every column between
+/// (scalar or string) is null in the whole batch and occupies no on-disk slot. Present scalars keep
+/// their persistent width on disk (`[null-flag byte][payload]`); a string's slot may carry one
+/// leading pad byte, resolved at read time from the slot width's parity.
 fn packed_ondisk_layout(
     schema: &[SavedFieldDesc],
     field_types: &[FieldValueType],
     persistent: usize,
     item_size: usize,
-    next_offsets: &[usize],
+    entries: &[(usize, usize)],
+    records: &[&[u8]],
 ) -> (Vec<usize>, Vec<PackedField>, usize) {
+    // Two batch layouts exist. The modern one (the historical reading): every string column has a
+    // table entry, scalars sit at their natural size (an 8-byte double, a 4-byte day count). The
+    // legacy CR8-era one: batch-wide-null columns occupy no slot, a scalar keeps its persistent
+    // width (a leading pad byte ahead of the payload), and a string slot may open with one pad byte.
+    //
+    // The table's second value tells them apart: `persistent - Y` names the next batch-present
+    // field after each string — its `rec_offset` in a modern batch, `rec_offset - 1` in a legacy
+    // one. Each entry votes against the schema's offsets; ties keep the historical reading.
+    let offsets: std::collections::HashSet<usize> = schema.iter().map(|f| f.rec_offset).collect();
+    let (mut modern_votes, mut legacy_votes) = (0usize, 0usize);
+    for &(next_present, _) in entries {
+        // `entries` stores `persistent + 1 - Y`, the legacy reading; the modern reading is one less.
+        if next_present > 0 && offsets.contains(&(next_present - 1)) {
+            modern_votes += 1;
+        }
+        if offsets.contains(&next_present) {
+            legacy_votes += 1;
+        }
+    }
+    if legacy_votes > modern_votes {
+        if let Some(legacy) = packed_ondisk_layout_legacy(
+            schema, field_types, persistent, item_size, entries, records,
+        ) {
+            return (legacy.0, legacy.1, legacy.2);
+        }
+    }
+    let modern = packed_ondisk_layout_modern(schema, field_types, persistent, item_size, entries);
+    (modern.0, modern.1, modern.2)
+}
+
+/// The modern packed walk: a field is a **compacted string** iff the next unconsumed column-table
+/// boundary falls within its persistent span (`entries[si].1 <= cur + pw`) — a scalar or a fixed
+/// short string keeps its natural width on disk, so the next boundary (belonging to a later,
+/// actually-compacted string) always lies strictly beyond `cur + pw`. The last field always ends at
+/// `item_size`. Returns the widths, kinds, bitmap width, and the walk's final on-disk cursor (for
+/// the exact-fit check).
+fn packed_ondisk_layout_modern(
+    schema: &[SavedFieldDesc],
+    field_types: &[FieldValueType],
+    persistent: usize,
+    item_size: usize,
+    entries: &[(usize, usize)],
+) -> (Vec<usize>, Vec<PackedField>, usize, usize) {
     let n = schema.len();
     let (pwidths, bitmap_w) = record_slot_layout(schema, persistent);
     let mut order: Vec<usize> = (0..n).collect();
@@ -246,9 +313,8 @@ fn packed_ondisk_layout(
     for (idx, &k) in order.iter().enumerate() {
         let pw = pwidths.get(k).copied().unwrap_or(0);
         let last = idx + 1 == order.len();
-        let boundary = next_offsets.get(si).copied();
-        let compacted =
-            si < next_offsets.len() && (last || boundary.unwrap_or(usize::MAX) <= cur + pw);
+        let boundary = entries.get(si).map(|e| e.1);
+        let compacted = si < entries.len() && (last || boundary.unwrap_or(usize::MAX) <= cur + pw);
         let (w, kind) = if compacted {
             si += 1;
             let end = if last {
@@ -276,7 +342,146 @@ fn packed_ondisk_layout(
         kinds[k] = kind;
         cur += w;
     }
-    (widths, kinds, bitmap_w)
+    (widths, kinds, bitmap_w, cur)
+}
+
+/// The unused on-disk bytes a legacy record may end with (observed: a few bytes of trailing pad).
+const LEGACY_TAIL_SLACK: usize = 15;
+/// Backstop on the legacy layout search's state count.
+const LEGACY_SEARCH_CAP: usize = 1_000_000;
+
+/// The legacy (CR8-era) packed walk. Returns the widths, kinds, bitmap width, and the walk's final
+/// on-disk cursor — or `None` when no consistent layout exists.
+///
+/// A string column carries a table entry only when it was actually **compacted** (its on-disk slot
+/// differs from its persistent width); an uncompacted string has no entry and keeps its persistent
+/// width. Which strings consumed which entries is not stated, so the walk searches: at each string
+/// it tries "consume the next entry" then "persistent width", validating the candidate slot against
+/// every record — a string slot is `[pad?][UTF-16LE…][NUL][zero padding]` with the pad present when
+/// the slot width is odd — and accepts the assignment whose walk consumes every entry and lands
+/// within [`LEGACY_TAIL_SLACK`] of `item_size`. Scalars are forced moves (persistent width), and a
+/// field between a consumed entry's string and its stated next-present field is batch-wide null
+/// (zero width).
+fn packed_ondisk_layout_legacy(
+    schema: &[SavedFieldDesc],
+    field_types: &[FieldValueType],
+    persistent: usize,
+    item_size: usize,
+    entries: &[(usize, usize)],
+    records: &[&[u8]],
+) -> Option<(Vec<usize>, Vec<PackedField>, usize, usize)> {
+    let n = schema.len();
+    let (pwidths, bitmap_w) = record_slot_layout(schema, persistent);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&k| schema[k].rec_offset);
+    let kinds: Vec<PackedField> = (0..n)
+        .map(|k| {
+            let vt = field_types
+                .get(k)
+                .copied()
+                .unwrap_or(FieldValueType::Int32s);
+            packed_field(vt, pwidths.get(k).copied().unwrap_or(0))
+        })
+        .collect();
+
+    let mut search = LegacySearch {
+        schema,
+        order: &order,
+        pwidths: &pwidths,
+        kinds: &kinds,
+        entries,
+        records,
+        item_size,
+        steps: 0,
+        widths: vec![0usize; n],
+    };
+    let cur = search.place(0, bitmap_w, bitmap_w, 0)?;
+    Some((search.widths, kinds, bitmap_w, cur))
+}
+
+/// The state of the legacy layout search (see [`packed_ondisk_layout_legacy`]).
+struct LegacySearch<'a> {
+    schema: &'a [SavedFieldDesc],
+    order: &'a [usize],
+    pwidths: &'a [usize],
+    kinds: &'a [PackedField],
+    entries: &'a [(usize, usize)],
+    records: &'a [&'a [u8]],
+    item_size: usize,
+    steps: usize,
+    widths: Vec<usize>,
+}
+
+impl LegacySearch<'_> {
+    /// Place fields from position `i` on, with the on-disk cursor at `cur`, the persistent-space
+    /// cursor at `cp` (fields below it are batch-wide null), and `ei` entries consumed. Returns the
+    /// final on-disk cursor of the first consistent completion.
+    fn place(&mut self, i: usize, cur: usize, cp: usize, ei: usize) -> Option<usize> {
+        self.steps += 1;
+        if self.steps > LEGACY_SEARCH_CAP {
+            return None;
+        }
+        if i == self.order.len() {
+            let fits = ei == self.entries.len()
+                && cur <= self.item_size
+                && self.item_size - cur <= LEGACY_TAIL_SLACK;
+            return fits.then_some(cur);
+        }
+        let k = self.order[i];
+        let off = self.schema[k].rec_offset;
+        let pw = self.pwidths.get(k).copied().unwrap_or(0);
+        if off < cp {
+            // Batch-wide null: no slot.
+            self.widths[k] = 0;
+            return self.place(i + 1, cur, cp, ei);
+        }
+        if !matches!(self.kinds[k], PackedField::Str) {
+            // A scalar keeps its persistent slot width on disk — a leading null-flag byte plus the
+            // payload, recovered from the slot tail.
+            let w = pw.min(self.item_size.saturating_sub(cur));
+            self.widths[k] = w;
+            return self.place(i + 1, cur + w, off + pw, ei);
+        }
+        // A string: first as an uncompacted column at its persistent width — the reading whose slot
+        // keeps the pad-parity rule when both fit (a compacted slot never equals the persistent
+        // width, so when the persistent-width slot validates in every record it is the slot)…
+        let w = pw.min(self.item_size.saturating_sub(cur));
+        if self.slot_ok(cur, w) {
+            self.widths[k] = w;
+            if let Some(fin) = self.place(i + 1, cur + w, off + pw, ei) {
+                return Some(fin);
+            }
+        }
+        // …then as a compacted column consuming the next entry.
+        if let Some(&(next_present, end)) = self.entries.get(ei) {
+            let w = end.min(self.item_size).saturating_sub(cur);
+            if w > 0 && self.slot_ok(cur, w) {
+                self.widths[k] = w;
+                if let Some(fin) = self.place(i + 1, cur + w, next_present.max(off + 1), ei + 1) {
+                    return Some(fin);
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether `[cur..cur+w)` reads as a string slot in every record: an optional pad byte (odd
+    /// width), UTF-16LE data up to a NUL pair, zero padding after. Vacuously true with no records.
+    fn slot_ok(&self, cur: usize, w: usize) -> bool {
+        if w == 0 {
+            return false;
+        }
+        self.records.iter().all(|rec| {
+            let Some(slot) = rec.get(cur..cur + w) else {
+                return false;
+            };
+            let data = &slot[w & 1..];
+            let Some(nul) = data.chunks_exact(2).position(|c| c == [0, 0]) else {
+                return data.is_empty();
+            };
+            data[nul * 2..].iter().all(|&b| b == 0)
+        })
+    }
 }
 
 /// Decode the memo-less **packed** index — its string columns are stored inline, compacted per batch.
@@ -297,7 +502,7 @@ pub(crate) fn decode_packed_index(
     persistent: usize,
 ) -> SavedRowset {
     let schema = &catalog.fields;
-    let layouts = packed_index_layouts(catalog);
+    let layouts = packed_index_layouts(catalog, persistent);
     let record_count: u32 = layouts.iter().map(|l| l.count).sum();
     let mut first_problem: Option<SavedDataStatus> = None;
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -329,11 +534,33 @@ pub(crate) fn decode_packed_index(
             break;
         };
         // The batch's own column table gives the compacted-string boundaries; the layout is resolved
-        // structurally from it (no dependence on a resolved string count).
+        // structurally from it plus the records themselves (the legacy walk probes them to tell a
+        // compacted string from one stored at its persistent width).
+        let recs: Vec<&[u8]> = (0..lay.count as usize)
+            .map(|i| &inf[start + i * is..start + (i + 1) * is])
+            .collect();
         let (widths, kinds, bitmap_w) =
-            packed_ondisk_layout(schema, field_types, persistent, is, &lay.next_offsets);
-        for i in 0..lay.count as usize {
-            let rec = &inf[start + i * is..start + (i + 1) * is];
+            packed_ondisk_layout(schema, field_types, persistent, is, &lay.entries, &recs);
+        if std::env::var_os("RPT_DEBUG_LAYOUT").is_some() {
+            let mut order: Vec<usize> = (0..schema.len()).collect();
+            order.sort_by_key(|&j| schema[j].rec_offset);
+            let mut cur = bitmap_w;
+            for &j in &order {
+                let w = widths[j];
+                let kind = match kinds[j] {
+                    PackedField::Str => "str",
+                    PackedField::Int(_) => "int",
+                    PackedField::Float(_) => "flt",
+                };
+                eprintln!(
+                    "LAYOUT batch{k} [{j:2}] {kind} disk=0x{cur:04x}+{w:<4} {}",
+                    schema[j].name
+                );
+                cur += w;
+            }
+            eprintln!("LAYOUT batch{k} end=0x{cur:04x} item_size=0x{is:04x}");
+        }
+        for rec in recs {
             rows.push(decode_packed_record(rec, schema, &kinds, &widths, bitmap_w));
         }
     }
@@ -434,12 +661,14 @@ mod tests {
             FieldValueType::String,
         ];
         let item_size = 60usize;
-        let next_offsets = vec![30usize, 42]; // s1→n at 30; s2 is last so 42 is unused (item_size wins)
+        // (next batch-present persistent offset, on-disk end): s1→n at disk 31; s2 is last and
+        // runs to item_size. Compacted slots are odd-width ([pad][data][NUL]).
+        let entries = vec![(208usize, 31usize), (300, 60)];
         let (widths, kinds, bitmap_w) =
-            packed_ondisk_layout(&schema, &field_types, 300, item_size, &next_offsets);
+            packed_ondisk_layout(&schema, &field_types, 300, item_size, &entries, &[]);
         assert_eq!(bitmap_w, 2);
-        // d: [2..6]=4 (Date); s1: [6..30]=24; n: [30..38]=8 (Number); s2: [38..60]=22 (to item_size)
-        assert_eq!(widths, vec![4, 24, 8, 22]);
+        // d: [2..6]=4 (Date); s1: [6..31]=25; n: [31..39]=8 (Number); s2: [39..60]=21 (to item_size)
+        assert_eq!(widths, vec![4, 25, 8, 21]);
         assert!(matches!(kinds[0], PackedField::Int(4)));
         assert!(matches!(kinds[1], PackedField::Str));
         assert!(matches!(kinds[2], PackedField::Float(8)));
@@ -458,13 +687,13 @@ mod tests {
             FieldValueType::String,
             FieldValueType::Number,
         ];
-        let item_size = 26usize; // bitmap 2 + big 12 + code 4 + number 8
-        let next_offsets = vec![14usize]; // big ends at on-disk 14; code + number are fixed
+        let item_size = 27usize; // bitmap 2 + big 13 + code 4 + number 8
+        let entries = vec![(200usize, 15usize)]; // big ends at on-disk 15; code + number are fixed
         let (widths, kinds, bitmap_w) =
-            packed_ondisk_layout(&schema, &field_types, 212, item_size, &next_offsets);
+            packed_ondisk_layout(&schema, &field_types, 212, item_size, &entries, &[]);
         assert_eq!(bitmap_w, 2);
-        // big: [2..14]=12 (compacted); code: fixed persistent width 4; number: last → item_size-cur.
-        assert_eq!(widths[0], 12);
+        // big: [2..15]=13 (compacted); code: fixed persistent width 4; number: persistent width 8.
+        assert_eq!(widths[0], 13);
         assert_eq!(widths[1], 4);
         assert!(matches!(kinds[0], PackedField::Str)); // compacted
         assert!(matches!(kinds[1], PackedField::Str)); // fixed short string, still read as string

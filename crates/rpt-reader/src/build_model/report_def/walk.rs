@@ -613,11 +613,21 @@ impl<'a> RdWalk<'a> {
         }
     }
 
-    /// `0xff` — the current section's conditional-format formulas.
+    /// `0xff` — the conditional-format formulas of the current section, or of its area: the wrapper
+    /// parents the `0xfe` format block, whose `is_section` flag states which level it decorates.
     fn apply_section_conditions(&mut self, node: &RecordNode) {
         let row = self.row(&ft::SECTION_FORMAT_WRAPPER, node);
         let resolved = resolve_conditions(&condition_slots(&row), &self.conditions);
-        if let Some(sec) = current_section(&mut self.areas) {
+        let for_area = node
+            .children
+            .first()
+            .map(|child| !is_section_format(&self.row(&ft::AREA_SECTION_FORMAT, child)))
+            .unwrap_or(false);
+        if for_area {
+            if let Some(area) = self.areas.last_mut() {
+                area.condition_formulas.extend(resolved);
+            }
+        } else if let Some(sec) = current_section(&mut self.areas) {
             sec.condition_formulas.extend(resolved);
         }
     }

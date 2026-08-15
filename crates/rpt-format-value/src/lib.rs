@@ -114,6 +114,10 @@ pub struct Locale {
     pub currency_negative: NegativeStyle,
     /// Decimal places a value type formats with by default (Crystal's en-US default is `2`).
     pub default_decimals: u32,
+    /// Render `DateTime` database fields as dates (Crystal's report option "convert date-time
+    /// field: to Date", the SDK's `crDateTimeToDate`). The option's byte in `Contents` is not yet
+    /// decoded, so it is stated at render time; legacy (CR8-upgraded) reports typically carry it.
+    pub datetime_to_date: bool,
 }
 
 impl Default for Locale {
@@ -317,6 +321,7 @@ pub const EN_US: Locale = Locale {
     currency_position: CurrencyPosition::LeadingNoSpace,
     currency_negative: NegativeStyle::Parens,
     default_decimals: 2,
+    datetime_to_date: false,
 };
 
 const EN_GB: Locale = Locale {
@@ -337,6 +342,7 @@ const EN_GB: Locale = Locale {
     currency_position: CurrencyPosition::LeadingNoSpace,
     currency_negative: NegativeStyle::LeadingMinus,
     default_decimals: 2,
+    datetime_to_date: false,
 };
 
 const DE_DE: Locale = Locale {
@@ -357,6 +363,7 @@ const DE_DE: Locale = Locale {
     currency_position: CurrencyPosition::TrailingSpace,
     currency_negative: NegativeStyle::LeadingMinus,
     default_decimals: 2,
+    datetime_to_date: false,
 };
 
 const FR_FR: Locale = Locale {
@@ -377,6 +384,7 @@ const FR_FR: Locale = Locale {
     currency_position: CurrencyPosition::TrailingSpace,
     currency_negative: NegativeStyle::LeadingMinus,
     default_decimals: 2,
+    datetime_to_date: false,
 };
 
 const ES_ES: Locale = Locale {
@@ -397,6 +405,7 @@ const ES_ES: Locale = Locale {
     currency_position: CurrencyPosition::TrailingSpace,
     currency_negative: NegativeStyle::LeadingMinus,
     default_decimals: 2,
+    datetime_to_date: false,
 };
 
 const IT_IT: Locale = Locale {
@@ -417,10 +426,85 @@ const IT_IT: Locale = Locale {
     currency_position: CurrencyPosition::TrailingNoSpace,
     currency_negative: NegativeStyle::LeadingMinus,
     default_decimals: 2,
+    datetime_to_date: false,
+};
+
+/// Greek month names (nominative), January … December.
+const EL_MONTHS: [&str; 12] = [
+    "Ιανουάριος",
+    "Φεβρουάριος",
+    "Μάρτιος",
+    "Απρίλιος",
+    "Μάιος",
+    "Ιούνιος",
+    "Ιούλιος",
+    "Αύγουστος",
+    "Σεπτέμβριος",
+    "Οκτώβριος",
+    "Νοέμβριος",
+    "Δεκέμβριος",
+];
+const EL_MONTHS_ABBR: [&str; 12] = [
+    "Ιαν", "Φεβ", "Μάρ", "Απρ", "Μάι", "Ιούν", "Ιούλ", "Αύγ", "Σεπ", "Οκτ", "Νοέ", "Δεκ",
+];
+const EL_DAYS: [&str; 7] = [
+    "Κυριακή",
+    "Δευτέρα",
+    "Τρίτη",
+    "Τετάρτη",
+    "Πέμπτη",
+    "Παρασκευή",
+    "Σάββατο",
+];
+const EL_DAYS_ABBR: [&str; 7] = ["Κυρ", "Δευ", "Τρί", "Τετ", "Πέμ", "Παρ", "Σάβ"];
+
+/// Greek (Cyprus): `dd/MM/yyyy` with leading zeros, comma decimals, dot grouping, leading `€`.
+const EL_CY: Locale = Locale {
+    tag: "el-CY",
+    decimal_sep: ',',
+    thousands_sep: '.',
+    date_sep: '/',
+    date_order: DateOrder::DayMonthYear,
+    short_date_leading_zero: true,
+    months: &EL_MONTHS,
+    months_abbrev: &EL_MONTHS_ABBR,
+    days: &EL_DAYS,
+    days_abbrev: &EL_DAYS_ABBR,
+    twelve_hour: true,
+    am: "πμ",
+    pm: "μμ",
+    currency_symbol: "€",
+    currency_position: CurrencyPosition::LeadingNoSpace,
+    currency_negative: NegativeStyle::LeadingMinus,
+    default_decimals: 2,
+    datetime_to_date: false,
+};
+
+/// Greek (Greece): like el-CY but the Windows short date is unpadded (`d/M/yyyy`) and the euro
+/// trails the amount (`1.234,00 €`).
+const EL_GR: Locale = Locale {
+    tag: "el-GR",
+    decimal_sep: ',',
+    thousands_sep: '.',
+    date_sep: '/',
+    date_order: DateOrder::DayMonthYear,
+    short_date_leading_zero: false,
+    months: &EL_MONTHS,
+    months_abbrev: &EL_MONTHS_ABBR,
+    days: &EL_DAYS,
+    days_abbrev: &EL_DAYS_ABBR,
+    twelve_hour: true,
+    am: "πμ",
+    pm: "μμ",
+    currency_symbol: "€",
+    currency_position: CurrencyPosition::TrailingSpace,
+    currency_negative: NegativeStyle::LeadingMinus,
+    default_decimals: 2,
+    datetime_to_date: false,
 };
 
 /// The built-in locale table, with a documented en-US fallback.
-pub const BUILTIN: &[Locale] = &[EN_US, EN_GB, DE_DE, FR_FR, ES_ES, IT_IT];
+pub const BUILTIN: &[Locale] = &[EN_US, EN_GB, DE_DE, FR_FR, ES_ES, IT_IT, EL_CY, EL_GR];
 
 /// Number formatting spec (SDK `INumericFieldFormat`).
 #[derive(Debug, Clone, PartialEq, Eq)]
