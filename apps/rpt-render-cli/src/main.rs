@@ -975,7 +975,14 @@ fn report_parameters(
     cli: &Cli,
     log: &Log,
 ) -> Result<rpt_data::Parameters, RenderError> {
-    let (parameters, resolved) = params::build(report, &cli.params, log)?;
+    let built = params::build(report, &cli.params)?;
+    let (parameters, resolved) = (built.params, built.resolved);
+    // A value supplied for a name the report does not declare cannot reach the render, so the output
+    // is for different criteria than the user asked for. Reported at ERROR severity so `-q` (errors
+    // only) cannot hide it from a scripted run; the render still proceeds on the report's defaults.
+    for warning in built.warnings {
+        log.error_at(Comp::Entry, warning);
+    }
     if resolved.is_empty() {
         let declared = params::declared(report);
         if declared.is_empty() {

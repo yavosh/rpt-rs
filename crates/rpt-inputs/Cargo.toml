@@ -1,0 +1,21 @@
+[package]
+name = "rpt-inputs"
+description = "A report's external inputs: the parameters it declares (with value coercion to their declared types) and the data sources it reads from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+rpt-model = { workspace = true }
+rpt-formula = { workspace = true }
+rpt-data = { workspace = true }
+
+[lints]
+workspace = true
