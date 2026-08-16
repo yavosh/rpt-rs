@@ -18,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 rpt-reader = { workspace = true }
 rpt-render = { workspace = true }
+rpt-data = { workspace = true }
+rpt-db-oracle = { workspace = true }
 rpt-inputs = { workspace = true }
 rpt-pages = { workspace = true }
 rpt-query = { workspace = true }

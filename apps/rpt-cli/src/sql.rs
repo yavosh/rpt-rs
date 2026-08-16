@@ -279,6 +279,7 @@ fn dialect_name(d: Dialect) -> &'static str {
         Dialect::Postgres => "postgres",
         Dialect::Sqlite => "sqlite",
         Dialect::Mysql => "mysql",
+        Dialect::Oracle => "oracle",
     }
 }
 
@@ -289,8 +290,9 @@ pub(crate) fn parse_dialect(name: Option<&str>) -> Result<Dialect, CliError> {
         None | Some("postgres") | Some("postgresql") | Some("pg") => Ok(Dialect::Postgres),
         Some("sqlite") => Ok(Dialect::Sqlite),
         Some("mysql") | Some("mariadb") => Ok(Dialect::Mysql),
+        Some("oracle") | Some("ora") => Ok(Dialect::Oracle),
         Some(other) => Err(CliError::usage(format!(
-            "unknown --dialect '{other}' (expected postgres, sqlite, or mysql)"
+            "unknown --dialect '{other}' (expected postgres, sqlite, mysql, or oracle)"
         ))),
     }
 }
@@ -484,7 +486,8 @@ mod tests {
         assert_eq!(parse_dialect(Some("Postgres")).unwrap(), Dialect::Postgres);
         assert_eq!(parse_dialect(Some("sqlite")).unwrap(), Dialect::Sqlite);
         assert_eq!(parse_dialect(Some("MySQL")).unwrap(), Dialect::Mysql);
-        assert!(parse_dialect(Some("oracle")).is_err());
+        assert_eq!(parse_dialect(Some("Oracle")).unwrap(), Dialect::Oracle);
+        assert!(parse_dialect(Some("db2")).is_err());
     }
 
     #[test]

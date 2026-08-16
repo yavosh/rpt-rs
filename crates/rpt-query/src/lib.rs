@@ -148,6 +148,15 @@ pub enum Dialect {
     Sqlite,
     /// MySQL/MariaDB (`CAST(x AS CHAR)` casts, `` `…` `` quoting).
     Mysql,
+    /// Oracle (`CAST(x AS VARCHAR2(4000))` casts, `"…"` quoting, and **no `AS` before a table
+    /// alias** — Oracle accepts `AS` for a column alias only, and rejects the statement outright
+    /// otherwise). Always rendered by the hand-rolled builder, because sea-query ships no Oracle
+    /// backend to be correct-by-construction against.
+    ///
+    /// A `DATE`/`TIMESTAMP` cast to text is formatted by the session's `NLS_DATE_FORMAT`, so the
+    /// executing driver must pin those session formats or the re-typing downstream sees whatever
+    /// the server's locale happens to prefer.
+    Oracle,
 }
 
 impl Dialect {
@@ -159,6 +168,9 @@ impl Dialect {
             Dialect::Postgres => format!("{expr}::text"),
             Dialect::Sqlite => format!("CAST({expr} AS TEXT)"),
             Dialect::Mysql => format!("CAST({expr} AS CHAR)"),
+            // 4000 is the largest VARCHAR2 a non-extended Oracle allows, so it is the widest cast
+            // that works everywhere; a longer value is truncated rather than the query failing.
+            Dialect::Oracle => format!("CAST({expr} AS VARCHAR2(4000))"),
         }
     }
 
@@ -189,6 +201,9 @@ fn cast_expr(dialect: Dialect, alias: &str, field: &str) -> SimpleExpr {
         Dialect::Postgres => Expr::cust_with_expr("$1::text", colref),
         Dialect::Sqlite => colref.cast_as(Alias::new("TEXT")),
         Dialect::Mysql => colref.cast_as(Alias::new("CHAR")),
+        // Oracle never reaches the sea-query path (see `build_query_full`), but the cast is stated
+        // here too so the two paths cannot drift into disagreeing about what Oracle text is.
+        Dialect::Oracle => colref.cast_as(Alias::new("VARCHAR2(4000)")),
     }
 }
 
@@ -201,6 +216,7 @@ fn cast_raw_expr(dialect: Dialect, raw: &str) -> SimpleExpr {
         Dialect::Postgres => Expr::cust_with_expr("$1::text", inner),
         Dialect::Sqlite => inner.cast_as(Alias::new("TEXT")),
         Dialect::Mysql => inner.cast_as(Alias::new("CHAR")),
+        Dialect::Oracle => inner.cast_as(Alias::new("VARCHAR2(4000)")),
     }
 }
 
@@ -319,7 +335,9 @@ pub fn build_query_full(
         .iter()
         .any(|ti| is_command_table(&database.tables[*ti]));
 
-    let sql = if has_command {
+    // Oracle joins the command-table case on the hand-rolled path: sea-query has no Oracle backend,
+    // so there is no builder that would render its table aliases (or its casts) correctly.
+    let sql = if has_command || dialect == Dialect::Oracle {
         build_sql_raw(database, &order, &columns, dialect, where_sql.as_deref())
     } else {
         build_sql_seaquery(database, &order, &columns, dialect, where_sql.as_deref())
@@ -424,6 +442,10 @@ fn build_sql_seaquery(
         Dialect::Postgres => q.to_string(PostgresQueryBuilder),
         Dialect::Sqlite => q.to_string(SqliteQueryBuilder),
         Dialect::Mysql => q.to_string(MysqlQueryBuilder),
+        // Unreachable: `build_query_full` routes Oracle to the hand-rolled builder because
+        // sea-query has no Oracle backend. Rendering it as Postgres here would emit `AS` before
+        // every table alias — a syntax error on Oracle — so this refuses instead of guessing.
+        Dialect::Oracle => unreachable!("Oracle is rendered by the hand-rolled builder"),
     }
 }
 
@@ -739,13 +761,21 @@ fn join_clause(
 
 /// The `FROM`/`JOIN` source for a table: `"name" AS "alias"`, or `(<command sql>) AS "alias"` for a
 /// command table. Identifiers are quoted for `dialect`.
+///
+/// Oracle omits the `AS`: it is legal before a *column* alias and a syntax error before a *table*
+/// alias, so `"POLICY" AS "POLICY"` would fail the whole statement. Every table alias in a generated
+/// query is emitted here, so this is the one place the rule has to hold.
 fn from_source(table: &Table, dialect: Dialect) -> String {
+    let as_kw = match dialect {
+        Dialect::Oracle => "",
+        _ => " AS",
+    };
     match &table.command_text {
         Some(cmd) if !cmd.trim().is_empty() => {
-            format!("({cmd}) AS {}", dialect.quote_ident(&table.alias))
+            format!("({cmd}){as_kw} {}", dialect.quote_ident(&table.alias))
         }
         _ => format!(
-            "{} AS {}",
+            "{}{as_kw} {}",
             dialect.quote_ident(&table.name),
             dialect.quote_ident(&table.alias)
         ),
@@ -1051,6 +1081,31 @@ mod tests {
             )],
             ..Default::default()
         }
+    }
+
+    /// Oracle's table alias carries no `AS` — the keyword is legal before a column alias and a
+    /// syntax error before a table alias, so emitting it would fail the whole statement. The cast is
+    /// `VARCHAR2`, and a SQL Expression field keeps its `AS` because that one *is* a column alias.
+    #[test]
+    fn oracle_snapshot_drops_as_before_a_table_alias_only() {
+        let q = build_query_in(&one_table_db(), Dialect::Oracle).unwrap();
+        assert_eq!(
+            q.sql,
+            r#"SELECT CAST("countries"."id" AS VARCHAR2(4000)), CAST("countries"."name" AS VARCHAR2(4000)) FROM "countries" "countries""#
+        );
+
+        let exprs = [("calc".to_string(), "1+1".to_string())];
+        let q = build_query_full(&one_table_db(), &exprs, None, &[], Dialect::Oracle).unwrap();
+        assert!(
+            q.sql.contains(r#"CAST((1+1) AS VARCHAR2(4000)) AS "calc""#),
+            "a column alias keeps its AS: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains(r#""countries" AS "countries""#),
+            "no AS before the table alias: {}",
+            q.sql
+        );
     }
 
     #[test]

@@ -4,10 +4,8 @@
 
 /// An HTML `200` response.
 pub fn html(body: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    tiny_http::Response::from_string(body).with_header(header(
-        "Content-Type",
-        "text/html; charset=utf-8",
-    ))
+    tiny_http::Response::from_string(body)
+        .with_header(header("Content-Type", "text/html; charset=utf-8"))
 }
 
 /// A plain-text response with the given status code.

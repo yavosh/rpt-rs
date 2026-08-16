@@ -26,9 +26,9 @@ use crate::error::RenderError;
 #[cfg(feature = "db")]
 use rpt_reader::model::Report;
 
-pub use rpt_inputs::datasource::{enumerate, DataSource};
 #[cfg(feature = "db")]
 pub use rpt_inputs::datasource::scope_server_key;
+pub use rpt_inputs::datasource::{enumerate, DataSource};
 
 /// The report's sources that need live credentials (a real server/database, not field-definitions).
 pub fn credential_sources(sources: &[DataSource]) -> Vec<DataSource> {

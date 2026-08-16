@@ -157,7 +157,8 @@ fn undeclared_warning(report: &Report, key: &str) -> String {
         .parameter_fields()
         .map(|(fd, _)| fd.name.as_str())
         .collect();
-    let mut msg = format!("parameter {key:?} is not declared by the report, so its value is ignored");
+    let mut msg =
+        format!("parameter {key:?} is not declared by the report, so its value is ignored");
     match nearest(key, &declared) {
         Some(near) => msg.push_str(&format!(" — did you mean {near:?}?")),
         None => msg.push('.'),
@@ -509,8 +510,14 @@ mod coercion_tests {
     /// Each declared kind coerces the text a caller types into that kind's [`Value`].
     #[test]
     fn each_kind_coerces_its_own_text() {
-        assert_eq!(coerce(Vk::NumberParameter, " 643227 "), Ok(Value::Number(643_227.0)));
-        assert_eq!(coerce(Vk::CurrencyParameter, "12.50"), Ok(Value::Currency(12.5)));
+        assert_eq!(
+            coerce(Vk::NumberParameter, " 643227 "),
+            Ok(Value::Number(643_227.0))
+        );
+        assert_eq!(
+            coerce(Vk::CurrencyParameter, "12.50"),
+            Ok(Value::Currency(12.5))
+        );
         assert_eq!(coerce(Vk::BooleanParameter, "YES"), Ok(Value::Bool(true)));
         assert_eq!(coerce(Vk::BooleanParameter, "0"), Ok(Value::Bool(false)));
         assert_eq!(
@@ -523,7 +530,10 @@ mod coercion_tests {
         );
         assert_eq!(
             coerce(Vk::DateTimeParameter, "2026-08-16T09:30:15"),
-            Ok(Value::DateTime(Date::new(2026, 8, 16), Time::new(9, 30, 15)))
+            Ok(Value::DateTime(
+                Date::new(2026, 8, 16),
+                Time::new(9, 30, 15)
+            ))
         );
         assert_eq!(
             coerce(Vk::StringParameter, " kept as-is "),
