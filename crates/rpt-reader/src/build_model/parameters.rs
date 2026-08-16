@@ -40,6 +40,10 @@ pub(super) struct ParamRecord {
     /// [`build_orphan_param`] rather than joined.
     pub(super) guid: Option<String>,
     pub(super) prompt_text: String,
+    /// The parameter's own name, from the record's tail. This — not the prompt text — is the name a
+    /// `{?Name}` formula reference resolves against. Empty for a record whose writer stopped before
+    /// the tail.
+    pub(super) name: String,
     pub(super) is_sp_param: bool,
     pub(super) is_optional: bool,
     pub(super) allow_multiple: bool,
@@ -74,6 +78,7 @@ pub(super) fn parse_param_record(node: &RecordNode, logical: &[u8]) -> ParamReco
     ParamRecord {
         guid: (!id.is_empty()).then(|| id.to_owned()),
         prompt_text: row.text("prompt_text").to_owned(),
+        name: row.text("name").to_owned(),
         is_sp_param: row.u("parameter_type") == STORED_PROCEDURE_PARAMETER,
         is_optional: row.u("optional_prompt") != 0,
         allow_multiple: row.u("allow_multiple_values") != 0,
@@ -109,22 +114,29 @@ fn value_kind_from_code(code: u32) -> ParameterValueKind {
 }
 
 /// Synthesize a `ParameterField` from a `0x007a` record with no identity (a parameter referenced
-/// only by a formula, absent from the PromptManager). Its Name and PromptText are the record's
-/// prompt text; the value kind comes from the value type the record states; the flag attributes are
-/// the ones already decoded from the record. Initial/current value lists are empty (there is no
-/// PromptManager entry or `ReportParametersStream` join). Returns `None` if the record carries no
-/// usable name.
+/// only by a formula, absent from the PromptManager). The value kind comes from the value type the
+/// record states; the flag attributes are the ones already decoded from the record. Initial/current
+/// value lists are empty (there is no PromptManager entry or `ReportParametersStream` join).
+///
+/// The **name** is the record's tail `name`, which is what a `{?Name}` formula reference resolves
+/// against — not its prompt text, which is display copy and often differs from the name (a report
+/// prompting "Enter Policy No" can declare that parameter as `PolicyNo`). A record whose writer
+/// stopped before the tail carries no name, and only then does the prompt text stand in for one.
+///
+/// Returns `None` only when the record states neither, since a parameter with no name of any kind
+/// cannot be referenced.
 pub(super) fn build_orphan_param(rec: &ParamRecord) -> Option<FieldDef> {
-    let name = rec.prompt_text.clone();
-    if name.is_empty() {
-        return None;
-    }
+    let name = match (rec.name.is_empty(), rec.prompt_text.is_empty()) {
+        (false, _) => rec.name.clone(),
+        (true, false) => rec.prompt_text.clone(),
+        (true, true) => return None,
+    };
     let value_kind = value_kind_from_code(rec.value_type_code);
     Some(FieldDef {
         kind: FieldKindData::Parameter(Box::new(ParameterField {
             value_kind,
             parameter_type: crate::model::ParameterType::ReportParameter,
-            prompt_text: Some(name.clone()),
+            prompt_text: (!rec.prompt_text.is_empty()).then(|| rec.prompt_text.clone()),
             show_on_panel: false,
             editable_on_panel: false,
             optional_prompt: rec.is_optional,
