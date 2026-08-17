@@ -18,6 +18,7 @@ members = [
     "crates/rpt-render",
     "apps/rpt-render-cli",
     "apps/rpt-preview",
+    "apps/rpt-compat",
     "crates/rpt-render-pdf",
     "crates/rpt-db-postgres",
     "crates/rpt-db-sqlite",

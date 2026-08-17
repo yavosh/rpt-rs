@@ -1102,6 +1102,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpt-compat"
+version = "0.4.0"
+dependencies = [
+ "rpt-inputs",
+ "rpt-pages",
+ "rpt-query",
+ "rpt-reader",
+ "rpt-render",
+ "tiny_http",
+]
+
+[[package]]
 name = "rpt-data"
 version = "0.4.0"
 dependencies = [
