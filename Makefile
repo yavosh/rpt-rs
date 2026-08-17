@@ -41,7 +41,7 @@ export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER  ?= rust-lld
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS ?= -C target-feature=+crt-static
 
 .PHONY: help db-up db-down test-fixtures bless-fixtures test-fixtures-clean \
-        build build-debug run test lint fmt check \
+        build build-debug run test lint fmt check clean clean-dist \
         dist dist-macos-arm64 dist-macos-x86_64 dist-linux dist-linux-oracle dist-windows \
         cross-setup dist-list
 
@@ -104,6 +104,18 @@ check:
 	cargo fmt --all --check
 	$(MAKE) lint
 	$(MAKE) test
+
+## Delete every build artefact — the whole target/ tree, native and cross (a full rebuild follows).
+clean:
+	cargo clean
+
+## Delete only the cross-built binaries, keeping the native build (and its cache) intact.
+clean-dist:
+	@case "$(CROSS_DIR)" in \
+	  "" | "/" | "$(CURDIR)") \
+	    echo "refusing to remove CROSS_DIR=$(CROSS_DIR)"; exit 1 ;; \
+	esac
+	rm -rf -- "$(CROSS_DIR)"
 
 # --- Cross-built binaries ----------------------------------------------------------------------
 #
