@@ -20,7 +20,19 @@ CROSS_DIR   ?= $(CURDIR)/target/cross
 # Cross-compiling needs rustup's toolchain; the native build is happy with whatever `cargo` resolves
 # to. Override if rustup lives elsewhere:  make dist RUSTUP_BIN=$$HOME/.cargo/bin
 RUSTUP_BIN  ?= /opt/homebrew/opt/rustup/bin
-CROSS_CARGO  = PATH="$(RUSTUP_BIN):$$PATH" CARGO_TARGET_DIR=$(CROSS_DIR) cargo
+
+# A binary you hand to someone to run is stripped. The workspace release profile deliberately keeps
+# line tables so a panic backtrace names functions and source lines — worth it for a binary you
+# debug, dead weight for one you ship. On Windows that debug info is embedded in the .exe rather
+# than split into a sidecar, which took it to 78 MB: past the attachment and upload limits of most
+# mail, chat and file-share systems, so the file could not even be delivered. Stripped it is ~17 MB.
+# Overridable — `make dist STRIP=0` keeps the debug info.
+STRIP ?= 1
+ifeq ($(STRIP),1)
+STRIP_ENV = CARGO_PROFILE_RELEASE_DEBUG=false CARGO_PROFILE_RELEASE_STRIP=symbols
+endif
+
+CROSS_CARGO  = PATH="$(RUSTUP_BIN):$$PATH" CARGO_TARGET_DIR=$(CROSS_DIR) $(STRIP_ENV) cargo
 
 # The Windows GNU target links with mingw; the musl target links with rustup's bundled rust-lld, so
 # no C toolchain is needed for Linux.
