@@ -20,6 +20,7 @@ members = [
     "apps/rpt-preview",
     "apps/rpt-compat",
     "crates/rpt-render-pdf",
+    "crates/rpt-db-oracle",
     "crates/rpt-db-postgres",
     "crates/rpt-db-sqlite",
     "crates/rpt-render-util",
@@ -89,6 +90,7 @@ rpt-format-value = { path = "crates/rpt-format-value" }
 rpt-data = { path = "crates/rpt-data" }
 rpt-inputs = { path = "crates/rpt-inputs" }
 rpt-query = { path = "crates/rpt-query" }
+rpt-db-oracle = { path = "crates/rpt-db-oracle" }
 rpt-db-postgres = { path = "crates/rpt-db-postgres" }
 rpt-db-sqlite = { path = "crates/rpt-db-sqlite" }
 rpt-layout = { path = "crates/rpt-layout" }
@@ -115,6 +117,10 @@ cosmic-text = "0.19"
 krilla = { version = "0.8.2", default-features = false }
 harfrust = "0.5"
 postgres = "0.19"
+# Pure-Rust Oracle driver (TNS wire protocol; no OCI/ODPI-C). Async on tokio, so the sync RowSource
+# path bridges with a current-thread runtime.
+oracle-rs = "0.1"
+tokio = "1"
 # Minimal synchronous HTTP server for the local preview app (`apps/rpt-preview`).
 tiny_http = "0.12"
 rusqlite = "0.32"

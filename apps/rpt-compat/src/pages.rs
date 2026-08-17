@@ -8,6 +8,26 @@ use crate::report::{Entry, ParamInfo, Query, Summary};
 /// A report row on the index: the file, and either what we read from it or why we could not.
 pub type Row = (Entry, Result<Summary, String>);
 
+/// The query-string field naming the row source. Prefixed so it cannot collide with a report
+/// parameter of the same name; a report declaring a parameter called `__rpt_source` would find it
+/// shadowed, which is worth the certainty that these two never mix.
+pub const SOURCE_FIELD: &str = "__rpt_source";
+
+/// The query-string field prefix for a data source's connection string, suffixed by the source's
+/// index (`__rpt_conn0`, `__rpt_conn1`, …).
+pub const CONN_FIELD: &str = "__rpt_conn";
+
+/// True for a query-string field this app owns rather than one naming a report parameter.
+#[must_use]
+pub fn is_reserved_field(name: &str) -> bool {
+    name.starts_with("__rpt_")
+}
+
+/// Whether this build can fetch rows from a live Oracle database. The driver's TLS stack compiles C,
+/// so a build for a target with no C toolchain leaves it out — and the page then has to say so
+/// rather than offer a choice that cannot work.
+const HAS_ORACLE: bool = cfg!(feature = "oracle");
+
 const STYLE: &str = "\
 :root { color-scheme: light dark; }
 body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 62rem; padding: 0 1rem;
@@ -105,7 +125,7 @@ pub fn report(id: &str, summary: &Summary) -> String {
         escape(id),
         escape(&facts_line(summary))
     );
-    body.push_str(&params_form(id, &summary.params));
+    body.push_str(&params_form(id, summary));
     if let Some(sel) = &summary.selection {
         body.push_str(&format!(
             "<h2>Record selection</h2>\n<pre>{}</pre>\n",
@@ -131,27 +151,78 @@ fn facts_line(summary: &Summary) -> String {
     )
 }
 
-/// The parameter form, generated from what the report declares. A report with no parameters gets a
-/// plain Render button.
-fn params_form(id: &str, params: &[ParamInfo]) -> String {
+/// The render form: where the rows come from, then the report's own parameters.
+///
+/// The row source is a **required** choice with no preselected option. Saved data and a live
+/// database can disagree — that is the whole point of the harness — so the page must never quietly
+/// pick one and let the reader assume the other.
+fn params_form(id: &str, summary: &Summary) -> String {
     let action = format!("/report/{}/view", encode(id));
-    if params.is_empty() {
-        return format!(
-            "<h2>Render</h2>\n<p class=\"sub\">This report declares no parameters.</p>\n\
-             <form class=\"params\" action=\"{action}\" method=\"get\">\
-             <button type=\"submit\">Render</button></form>\n"
-        );
-    }
     let mut form = format!(
-        "<h2>Parameters</h2>\n<p class=\"sub\">A field left blank uses the report's stored value \
-         (its last-used value, else its default).</p>\n\
-         <form class=\"params\" action=\"{action}\" method=\"get\">\n"
+        "<h2>Render</h2>\n<form class=\"params\" action=\"{action}\" method=\"get\">\n{}",
+        source_picker(summary)
     );
-    for p in params {
-        form.push_str(&field(p));
+    if summary.params.is_empty() {
+        form.push_str("<p class=\"sub\">This report declares no parameters.</p>\n");
+    } else {
+        form.push_str(
+            "<p class=\"sub\">A parameter left blank uses the report's stored value (its last-used \
+             value, else its default).</p>\n",
+        );
+        for p in &summary.params {
+            form.push_str(&field(p));
+        }
     }
     form.push_str("<div><button type=\"submit\">Render</button></div>\n</form>\n");
     form
+}
+
+/// The row-source choice and, for the live option, one connection string per data source.
+///
+/// The connection string travels in the query string, so it is visible in the URL and in browser
+/// history. That is accepted for a tool that binds to `127.0.0.1` only; it is not a shape to carry
+/// over to anything reachable from elsewhere.
+fn source_picker(summary: &Summary) -> String {
+    let saved = summary.saved_rows.map_or_else(
+        || "no saved data in this file".to_string(),
+        |n| format!("{n} stored row(s)"),
+    );
+    let oracle_option = if HAS_ORACLE {
+        "<option value=\"oracle\">Oracle (live)</option>\n".to_string()
+    } else {
+        String::new()
+    };
+    let mut out = format!(
+        "<div><label for=\"{SOURCE_FIELD}\">Row source <span class=\"meta\">— required</span>\
+         </label>\n\
+         <select id=\"{SOURCE_FIELD}\" name=\"{SOURCE_FIELD}\" required>\n\
+         <option value=\"\" selected disabled>— choose —</option>\n\
+         <option value=\"saved\">Saved data ({})</option>\n\
+         {oracle_option}</select></div>\n",
+        escape(&saved)
+    );
+    if !HAS_ORACLE {
+        return format!(
+            "{out}<p class=\"sub\">This build has no Oracle support (compiled without the \
+             <code>oracle</code> feature), so only saved data can be rendered.</p>\n"
+        );
+    }
+    for (i, s) in summary.sources.iter().enumerate() {
+        let live = if summary.live_source == Some(i) {
+            "fetched from"
+        } else {
+            "not the main scope's source — subreports only"
+        };
+        out.push_str(&format!(
+            "<div><label for=\"{CONN_FIELD}{i}\">Oracle connection — {} \
+             <span class=\"meta\">({})</span></label>\n\
+             <input type=\"text\" id=\"{CONN_FIELD}{i}\" name=\"{CONN_FIELD}{i}\" \
+             placeholder=\"oracle://user:password@host:1521/service\" value=\"\"></div>\n",
+            escape(&s.describe()),
+            escape(live),
+        ));
+    }
+    out
 }
 
 fn field(p: &ParamInfo) -> String {
@@ -342,7 +413,9 @@ pub fn view(
         body.push_str(&format!("<p class=\"err\">{}</p>\n", escape(w)));
     }
     if !diagnostics.is_empty() {
-        body.push_str("<h2>Diagnostics</h2>\n<table>\n<tr><th></th><th>Message</th><th>Where</th></tr>\n");
+        body.push_str(
+            "<h2>Diagnostics</h2>\n<table>\n<tr><th></th><th>Message</th><th>Where</th></tr>\n",
+        );
         for d in diagnostics {
             body.push_str(&diagnostic_row(d));
         }
@@ -364,10 +437,7 @@ fn diagnostic_line(diagnostics: &[Diagnostic]) -> String {
         .iter()
         .filter(|d| matches!(d.severity, Severity::Error))
         .count();
-    format!(
-        "{} diagnostic(s), {errors} error(s)",
-        diagnostics.len()
-    )
+    format!("{} diagnostic(s), {errors} error(s)", diagnostics.len())
 }
 
 fn diagnostic_row(d: &Diagnostic) -> String {

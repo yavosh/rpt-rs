@@ -42,8 +42,10 @@ mod report;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[cfg(feature = "oracle")]
+use rpt_data::RowSource;
 use rpt_query::Dialect;
-use rpt_render::{PdfOptions, RenderOptions, ReportDocument};
+use rpt_render::{PdfOptions, RenderOptions, RenderSource, ReportDocument};
 
 /// The `-V`/`--version` line, from `[workspace.package] version` via `CARGO_PKG_VERSION`.
 const VERSION: &str = concat!("rpt-compat ", env!("CARGO_PKG_VERSION"));
@@ -239,8 +241,7 @@ fn handle(cli: &Cli, request: tiny_http::Request) -> std::io::Result<()> {
         },
         Route::View(id) => match render(cli, &id, query) {
             Ok((doc, warnings)) => {
-                let page =
-                    pages::view(&id, query, doc.pages.len(), &doc.diagnostics, &warnings);
+                let page = pages::view(&id, query, doc.pages.len(), &doc.diagnostics, &warnings);
                 request.respond(http::html(&page))
             }
             Err(msg) => request.respond(http::text(400, &msg)),
@@ -286,21 +287,118 @@ fn summarize(cli: &Cli, id: &str) -> Result<report::Summary, String> {
 /// Returns the paginated document and any warnings the parameter binding raised. A blank field is
 /// dropped rather than coerced: an empty text box means "not supplied", and the engine then binds
 /// the parameter's own stored value.
-fn render(cli: &Cli, id: &str, query: &str) -> Result<(rpt_pages::PagedDocument, Vec<String>), String> {
+fn render(
+    cli: &Cli,
+    id: &str,
+    query: &str,
+) -> Result<(rpt_pages::PagedDocument, Vec<String>), String> {
     let path = report::resolve(&cli.reports_dir, id)?;
     let doc = load(&path)?;
-    let supplied: Vec<(String, String)> = http::decode_pairs(query)
-        .into_iter()
-        .filter(|(_, v)| !v.trim().is_empty())
+    let fields = http::decode_pairs(query);
+    let supplied: Vec<(String, String)> = fields
+        .iter()
+        .filter(|(k, v)| !pages::is_reserved_field(k) && !v.trim().is_empty())
+        .cloned()
         .collect();
-    let built =
-        rpt_inputs::params::build(doc.report(), &supplied).map_err(|e| e.to_string())?;
+    let built = rpt_inputs::params::build(doc.report(), &supplied).map_err(|e| e.to_string())?;
+
+    let source = field(&fields, pages::SOURCE_FIELD).unwrap_or_default();
+    // Only the Oracle arm adds to this; a build without it leaves the list as the binding produced.
+    #[cfg_attr(not(feature = "oracle"), allow(unused_mut))]
+    let mut warnings = built.warnings;
+    // Held out here so the borrow outlives the RenderOptions that points at it.
+    #[cfg(feature = "oracle")]
+    let live;
+    let datasource = match source.as_str() {
+        "saved" => RenderSource::Saved,
+        #[cfg(feature = "oracle")]
+        "oracle" => {
+            live = oracle_source(doc.report(), &fields)?;
+            warnings.push(format!(
+                "rendered from Oracle: {} row(s) fetched. Subreports still render from their own \
+                 saved data — only the main scope is fetched live.",
+                live.rows().len()
+            ));
+            RenderSource::Rows(&live)
+        }
+        #[cfg(not(feature = "oracle"))]
+        "oracle" => {
+            return Err(
+                "this build has no Oracle support (built without the `oracle` feature)".to_string(),
+            )
+        }
+        // The choice is required rather than defaulted: saved data and a live database can
+        // disagree, and that disagreement is the thing this tool exists to show.
+        "" => {
+            return Err("choose a row source (saved data or Oracle) before rendering".to_string())
+        }
+        other => return Err(format!("unknown row source {other:?}")),
+    };
+
     let pages = doc.render_with(RenderOptions {
+        datasource,
         params: built.params,
         locale: cli.render_locale(),
         ..Default::default()
     });
-    Ok((pages, built.warnings))
+    Ok((pages, warnings))
+}
+
+/// The first value of `name` in the decoded query string.
+fn field(fields: &[(String, String)], name: &str) -> Option<String> {
+    fields
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.trim().to_string())
+}
+
+/// Fetch the main scope's rows from Oracle, using the connection string given for **its** data
+/// source — a report can read from several servers, so the connection is chosen by which source the
+/// main scope's tables belong to rather than by taking the first one offered.
+#[cfg(feature = "oracle")]
+fn oracle_source(
+    report: &rpt_reader::model::Report,
+    fields: &[(String, String)],
+) -> Result<rpt_db_oracle::OracleSource, String> {
+    let sources = rpt_inputs::datasource::enumerate(report);
+    let index = report::main_scope_source(report, &sources).ok_or_else(|| {
+        "this report's main scope binds no live table, so it can only render from saved data"
+            .to_string()
+    })?;
+    let conn = field(fields, &format!("{}{index}", pages::CONN_FIELD))
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "no Oracle connection string given for {}",
+                sources[index].describe()
+            )
+        })?;
+    let (sql_exprs, selection) = report::query_inputs(report);
+    rpt_db_oracle::OracleSource::fetch(
+        &conn,
+        &report.database,
+        &sql_exprs,
+        selection.as_deref(),
+        &[],
+        Some("rpt-compat"),
+    )
+    // `DbError` deliberately keeps the driver's error as a `source` rather than in its own message,
+    // so a chain-printing reporter shows it once. This page IS that reporter: without the chain the
+    // reader gets "connection failed" and no reason.
+    .map_err(|e| format!("Oracle fetch failed: {}", error_chain(&e)))
+}
+
+/// An error and its causes as one line, `: `-separated. Repeated links are not deduplicated — the
+/// chain is short enough that saying it plainly beats being clever about it.
+#[cfg(feature = "oracle")]
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        out.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    out
 }
 
 /// Export a rendered document to PDF bytes.
@@ -368,7 +466,10 @@ mod tests {
             route("/report/sub%2Fb.rpt"),
             Route::Detail("sub/b.rpt".to_string())
         );
-        assert_eq!(route("/report/a.rpt/view"), Route::View("a.rpt".to_string()));
+        assert_eq!(
+            route("/report/a.rpt/view"),
+            Route::View("a.rpt".to_string())
+        );
         assert_eq!(
             route("/report/sub%2Fb.rpt/pdf"),
             Route::Pdf("sub/b.rpt".to_string())

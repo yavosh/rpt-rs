@@ -80,17 +80,23 @@ pub fn resolve(root: &Path, id: &str) -> Result<PathBuf, String> {
         return Err("no report id given".to_string());
     }
     if id.contains('\\') {
-        return Err(format!("invalid report id {id:?}: '\\' is not a path separator here"));
+        return Err(format!(
+            "invalid report id {id:?}: '\\' is not a path separator here"
+        ));
     }
     let candidate = Path::new(id);
     if candidate.is_absolute() {
-        return Err(format!("invalid report id {id:?}: must be relative to the reports folder"));
+        return Err(format!(
+            "invalid report id {id:?}: must be relative to the reports folder"
+        ));
     }
     if candidate
         .components()
         .any(|c| !matches!(c, std::path::Component::Normal(_)))
     {
-        return Err(format!("invalid report id {id:?}: '..' and rooted paths are not allowed"));
+        return Err(format!(
+            "invalid report id {id:?}: '..' and rooted paths are not allowed"
+        ));
     }
     if !is_rpt(candidate) {
         return Err(format!("invalid report id {id:?}: not a .rpt file"));
@@ -106,7 +112,9 @@ pub fn resolve(root: &Path, id: &str) -> Result<PathBuf, String> {
     // Canonicalised on both sides, so a symlink pointing out of the corpus is caught here rather
     // than by the textual check above.
     if !path.starts_with(&root) {
-        return Err(format!("invalid report id {id:?}: resolves outside the reports folder"));
+        return Err(format!(
+            "invalid report id {id:?}: resolves outside the reports folder"
+        ));
     }
     if !path.is_file() {
         return Err(format!("no such report {id:?}"));
@@ -165,19 +173,53 @@ pub struct Summary {
     pub saved_rows: Option<u32>,
     /// The record-selection formula, when the report has one.
     pub selection: Option<String>,
+    /// Index into [`sources`](Self::sources) of the connection a live fetch of the **main scope**
+    /// would use. `None` when the main scope binds no credential-needing table.
+    pub live_source: Option<usize>,
+}
+
+/// The index in [`Summary::sources`] of the connection the **main scope** fetches from, when it has
+/// a live one. `None` for a report whose main scope binds no credential-needing table — there is
+/// nothing to connect to, so only saved data can render it.
+#[must_use]
+pub fn main_scope_source(report: &Report, sources: &[DataSource]) -> Option<usize> {
+    let key = rpt_inputs::datasource::scope_server_key(&report.database)?;
+    sources.iter().position(|s| s.group_id() == key)
+}
+
+/// The report's SQL Expression fields and record-selection formula — the two inputs a live fetch
+/// needs beyond the table graph itself.
+#[must_use]
+#[cfg(feature = "oracle")]
+pub fn query_inputs(report: &Report) -> (Vec<(String, String)>, Option<String>) {
+    let sql_exprs = report
+        .data_definition
+        .sql_expression_fields()
+        .map(|(fd, x)| (fd.name.clone(), x.text.clone()))
+        .collect();
+    let selection = report
+        .data_definition
+        .record_selection
+        .as_ref()
+        .map(|f| f.0.clone())
+        .filter(|s| !s.trim().is_empty());
+    (sql_exprs, selection)
 }
 
 /// Read everything the harness shows about one decoded report.
 pub fn summarize(report: &Report, dialect: Dialect) -> Summary {
     let mut queries = Vec::new();
     collect_queries(report, None, dialect, &mut queries);
+    let sources = rpt_inputs::datasource::enumerate(report);
+    let live_source = main_scope_source(report, &sources);
     Summary {
+        live_source,
         params: report
             .data_definition
             .parameter_fields()
             .map(|(fd, pf)| param_info(&fd.name, pf))
             .collect(),
-        sources: rpt_inputs::datasource::enumerate(report),
+        sources,
         queries,
         subreports: report.subreports.len(),
         tables: report.database.tables.len(),
@@ -314,7 +356,10 @@ mod tests {
         let root = dir.path().join("root");
 
         assert!(resolve(&root, "a.rpt").is_ok());
-        assert!(resolve(&root, "sub/b.rpt").is_ok(), "a nested id is addressable");
+        assert!(
+            resolve(&root, "sub/b.rpt").is_ok(),
+            "a nested id is addressable"
+        );
 
         for bad in [
             "",
@@ -359,8 +404,7 @@ mod tests {
                 let marker = std::process::id();
                 let local = 0u8;
                 let addr = std::ptr::addr_of!(local) as usize;
-                let path =
-                    std::env::temp_dir().join(format!("rpt-compat-test-{marker}-{addr:x}"));
+                let path = std::env::temp_dir().join(format!("rpt-compat-test-{marker}-{addr:x}"));
                 std::fs::create_dir_all(&path).expect("create temp dir");
                 TempDir(path)
             }
