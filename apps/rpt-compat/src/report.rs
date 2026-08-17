@@ -190,6 +190,7 @@ pub fn main_scope_source(report: &Report, sources: &[DataSource]) -> Option<usiz
 /// The report's SQL Expression fields and record-selection formula — the two inputs a live fetch
 /// needs beyond the table graph itself.
 #[must_use]
+#[cfg(feature = "oracle")]
 pub fn query_inputs(report: &Report) -> (Vec<(String, String)>, Option<String>) {
     let sql_exprs = report
         .data_definition

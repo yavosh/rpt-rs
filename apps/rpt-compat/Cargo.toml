@@ -19,11 +19,23 @@ path = "src/main.rs"
 rpt-reader = { workspace = true }
 rpt-render = { workspace = true }
 rpt-data = { workspace = true }
-rpt-db-oracle = { workspace = true }
+rpt-db-oracle = { workspace = true, optional = true }
 rpt-inputs = { workspace = true }
 rpt-pages = { workspace = true }
 rpt-query = { workspace = true }
 tiny_http = { workspace = true }
+
+[features]
+# Live Oracle rendering. On by default, because reading a report against its real database is the
+# point of the harness.
+#
+# It is a switch rather than a fixture because it is the one dependency that is not pure Rust: the
+# driver's TLS stack compiles C (rustls → aws-lc-sys), so a build for a target with no C toolchain
+# to hand — a statically linked musl binary cross-built from macOS, say — needs
+# `--no-default-features`. Without the feature the row-source picker offers saved data only, and
+# says why.
+default = ["oracle"]
+oracle = ["dep:rpt-db-oracle"]
 
 [lints]
 workspace = true

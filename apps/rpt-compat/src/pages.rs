@@ -23,6 +23,11 @@ pub fn is_reserved_field(name: &str) -> bool {
     name.starts_with("__rpt_")
 }
 
+/// Whether this build can fetch rows from a live Oracle database. The driver's TLS stack compiles C,
+/// so a build for a target with no C toolchain leaves it out — and the page then has to say so
+/// rather than offer a choice that cannot work.
+const HAS_ORACLE: bool = cfg!(feature = "oracle");
+
 const STYLE: &str = "\
 :root { color-scheme: light dark; }
 body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 62rem; padding: 0 1rem;
@@ -182,16 +187,26 @@ fn source_picker(summary: &Summary) -> String {
         || "no saved data in this file".to_string(),
         |n| format!("{n} stored row(s)"),
     );
+    let oracle_option = if HAS_ORACLE {
+        "<option value=\"oracle\">Oracle (live)</option>\n".to_string()
+    } else {
+        String::new()
+    };
     let mut out = format!(
         "<div><label for=\"{SOURCE_FIELD}\">Row source <span class=\"meta\">— required</span>\
          </label>\n\
          <select id=\"{SOURCE_FIELD}\" name=\"{SOURCE_FIELD}\" required>\n\
          <option value=\"\" selected disabled>— choose —</option>\n\
          <option value=\"saved\">Saved data ({})</option>\n\
-         <option value=\"oracle\">Oracle (live)</option>\n\
-         </select></div>\n",
+         {oracle_option}</select></div>\n",
         escape(&saved)
     );
+    if !HAS_ORACLE {
+        return format!(
+            "{out}<p class=\"sub\">This build has no Oracle support (compiled without the \
+             <code>oracle</code> feature), so only saved data can be rendered.</p>\n"
+        );
+    }
     for (i, s) in summary.sources.iter().enumerate() {
         let live = if summary.live_source == Some(i) {
             "fetched from"

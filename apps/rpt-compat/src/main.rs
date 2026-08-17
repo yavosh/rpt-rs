@@ -42,6 +42,7 @@ mod report;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[cfg(feature = "oracle")]
 use rpt_data::RowSource;
 use rpt_query::Dialect;
 use rpt_render::{PdfOptions, RenderOptions, RenderSource, ReportDocument};
@@ -302,11 +303,15 @@ fn render(
     let built = rpt_inputs::params::build(doc.report(), &supplied).map_err(|e| e.to_string())?;
 
     let source = field(&fields, pages::SOURCE_FIELD).unwrap_or_default();
+    // Only the Oracle arm adds to this; a build without it leaves the list as the binding produced.
+    #[cfg_attr(not(feature = "oracle"), allow(unused_mut))]
     let mut warnings = built.warnings;
     // Held out here so the borrow outlives the RenderOptions that points at it.
+    #[cfg(feature = "oracle")]
     let live;
     let datasource = match source.as_str() {
         "saved" => RenderSource::Saved,
+        #[cfg(feature = "oracle")]
         "oracle" => {
             live = oracle_source(doc.report(), &fields)?;
             warnings.push(format!(
@@ -315,6 +320,12 @@ fn render(
                 live.rows().len()
             ));
             RenderSource::Rows(&live)
+        }
+        #[cfg(not(feature = "oracle"))]
+        "oracle" => {
+            return Err(
+                "this build has no Oracle support (built without the `oracle` feature)".to_string(),
+            )
         }
         // The choice is required rather than defaulted: saved data and a live database can
         // disagree, and that disagreement is the thing this tool exists to show.
@@ -344,6 +355,7 @@ fn field(fields: &[(String, String)], name: &str) -> Option<String> {
 /// Fetch the main scope's rows from Oracle, using the connection string given for **its** data
 /// source — a report can read from several servers, so the connection is chosen by which source the
 /// main scope's tables belong to rather than by taking the first one offered.
+#[cfg(feature = "oracle")]
 fn oracle_source(
     report: &rpt_reader::model::Report,
     fields: &[(String, String)],
@@ -378,6 +390,7 @@ fn oracle_source(
 
 /// An error and its causes as one line, `: `-separated. Repeated links are not deduplicated — the
 /// chain is short enough that saying it plainly beats being clever about it.
+#[cfg(feature = "oracle")]
 fn error_chain(err: &dyn std::error::Error) -> String {
     let mut out = err.to_string();
     let mut source = err.source();
