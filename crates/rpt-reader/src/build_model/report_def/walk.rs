@@ -2,7 +2,9 @@
 //! built, the values one record carries forward to a later one, and one handler per record that
 //! writes into it.
 
-use super::conditions::{condition_formula_bodies, condition_slots, resolve_conditions};
+use super::conditions::{
+    condition_formula_bodies, condition_slots, condition_slots_numeric, resolve_conditions,
+};
 use super::data_source::{field_data_source, field_object, group_display_number};
 use super::formats::{
     apply_field_format_child, apply_object_format, build_border, build_font, build_object_name,
@@ -21,6 +23,7 @@ use crate::model::{
     Alignment, Area, AreaSectionKind, FieldRefKind, Group, ReportObject, ReportObjectKind,
     TextObject, Twips,
 };
+use crate::records::rtype::NUMERIC_FIELD_FORMAT_WRAPPER;
 use std::collections::BTreeMap;
 
 /// The walk over the flat report-definition record stream.
@@ -479,6 +482,16 @@ impl<'a> RdWalk<'a> {
         let Some(child) = node.children.first() else {
             return;
         };
+        // The numeric wrapper's own slots can bind conditional-format formulas to the format it
+        // wraps; resolved into an owned list before `areas` is borrowed (each of a field's two
+        // numeric slots has its own wrapper, so the conditions land on the slot whose wrapper
+        // bound them).
+        let numeric_conditions = if node.rtype == NUMERIC_FIELD_FORMAT_WRAPPER {
+            let row = self.row(&ft::NUMERIC_FIELD_FORMAT_WRAPPER, node);
+            resolve_conditions(&condition_slots_numeric(&row), &self.conditions)
+        } else {
+            Vec::new()
+        };
         // Reaches for `areas` rather than `self.object()` so the currency-slot flag, a disjoint
         // field, stays borrowable alongside the object.
         let Some(ReportObjectKind::Field(f)) = current_object(&mut self.areas).map(|o| &mut o.kind)
@@ -491,6 +504,7 @@ impl<'a> RdWalk<'a> {
             self.logical,
             ff,
             &mut self.numeric_currency_slot_pending,
+            numeric_conditions,
         );
     }
 
@@ -780,6 +794,38 @@ mod tests {
             )
         }
 
+        /// [`Stream::numeric_format`], with the wrapper's own trailing condition slots: eleven
+        /// unset slots (empty name, unusable index), then one binding `@name` to the formula at
+        /// `index` — the `currency_symbol_formula` position, the slot the real-world case binds.
+        fn numeric_format_conditioned(
+            &mut self,
+            decimal_places: u16,
+            name: &str,
+            index: u16,
+        ) -> RecordNode {
+            self.nested(
+                NUMERIC_FIELD_FORMAT_WRAPPER,
+                NUMERIC_FIELD_FORMAT,
+                move |e| {
+                    e.i16_be(0); // suppress if zero
+                    e.narrowing(1, 0); // negative type
+                    e.i16_be(0); // thousands separator
+                    e.i16_be(0); // leading zero
+                    e.u16_be(decimal_places);
+                },
+                move |e| {
+                    for _ in 0..11 {
+                        e.string(b""); // an unset slot names no formula
+                        e.narrowing(1, 0);
+                        e.u16_be(UNSET_FIELD_INDEX);
+                    }
+                    e.string(format!("@{name}").as_bytes());
+                    e.narrowing(1, 0); // the pool the reference names
+                    e.u16_be(index);
+                },
+            )
+        }
+
         /// An area format record (`0xfe`) — `is_section` is `0`, so it formats the area itself.
         fn area_format(&mut self, visible: bool) -> RecordNode {
             self.record(AREA_SECTION_FORMAT, move |e| {
@@ -920,6 +966,55 @@ mod tests {
         let format = format_of(only_object(&areas));
         assert_eq!(format.currency_numeric.decimal_places, 1);
         assert_eq!(format.numeric.decimal_places, 3);
+    }
+
+    /// The wrapper's condition slots land on the numeric slot that wrapper decorates and no other:
+    /// each of a field's two wrappers carries its own set, so a conditioned second (number) wrapper
+    /// leaves the currency slot clean — the attachment a refactor could silently invert.
+    #[test]
+    fn a_numeric_wrapper_binds_its_conditions_to_its_own_slot() {
+        let mut s = Stream::default();
+        let (area, section) = (s.area("ReportHeaderArea1"), s.section(320));
+        let field = s.field_object("Table.amount");
+        let currency = s.numeric_format(3);
+        let body = "if {t.section} = \"SCALE\" then \"%\" else \"€\"";
+        let number = s.numeric_format_conditioned(1, "Currency_Symbol", 7);
+
+        let mut w = RdWalk::new(&[], &s.logical, &[]);
+        w.conditions
+            .insert(7, ("Currency_Symbol".to_string(), body.to_string()));
+        for node in [&area, &section, &field, &currency, &number] {
+            w.feed(node);
+        }
+        let areas = w.into_areas();
+        let format = format_of(only_object(&areas));
+        assert!(format.currency_numeric.condition_formulas.is_empty());
+        assert_eq!(
+            format.numeric.condition_formulas,
+            vec![("Currency_Symbol".to_string(), body.to_string())]
+        );
+    }
+
+    /// The numeric wrapper accepts only the numeric condition vocabulary: a slot naming an
+    /// object-format condition (`@Object_Visibility`) on a `0xf9` wrapper is not carried, so the
+    /// two vocabularies cannot leak into each other's owner records.
+    #[test]
+    fn the_numeric_wrapper_rejects_the_object_condition_vocabulary() {
+        let mut s = Stream::default();
+        let (area, section) = (s.area("ReportHeaderArea1"), s.section(320));
+        let field = s.field_object("Table.amount");
+        let number = s.numeric_format_conditioned(1, "Object_Visibility", 7);
+
+        let mut w = RdWalk::new(&[], &s.logical, &[]);
+        w.conditions
+            .insert(7, ("Object_Visibility".to_string(), "true".to_string()));
+        for node in [&area, &section, &field, &number] {
+            w.feed(node);
+        }
+        let areas = w.into_areas();
+        let format = format_of(only_object(&areas));
+        assert!(format.numeric.condition_formulas.is_empty());
+        assert!(format.currency_numeric.condition_formulas.is_empty());
     }
 
     /// A lone numeric record fills both slots: the currency slot is still pending when the number

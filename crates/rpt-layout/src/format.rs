@@ -25,6 +25,24 @@ use rpt_model::{
     HourFormat, MinuteFormat, MonthFormat, NegativeFormat, SecondFormat, TimeBase, YearFormat,
 };
 
+/// Per-row overrides of a numeric format's stored currency properties, produced by evaluating the
+/// conditional-format formulas bound to the `0x00f9` wrapper's currency slots (see
+/// [`NumericFieldFormat::condition_formulas`](rpt_model::NumericFieldFormat::condition_formulas)).
+/// Plain resolved values, not formulas: evaluation lives with the record context (see
+/// `resolve::numeric_condition_overrides`), so the format resolution here stays pure. A `None`
+/// leaves the stored property in place; the default overrides nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NumericConditionOverrides {
+    /// `@Currency_Symbol_Type` — a [`CurrencySymbolFormat`] ordinal (`crNoCurrencySymbol` = 0,
+    /// fixed = 1, `crFloatingCurrencySymbol` = 2).
+    pub currency_symbol_type: Option<i32>,
+    /// `@Currency_Position_Type` — a [`rpt_model::CurrencyPosition`] ordinal (0–3; 2 and 3 are the
+    /// trailing placements).
+    pub currency_position: Option<i32>,
+    /// `@Currency_Symbol` — the symbol text itself.
+    pub currency_symbol: Option<String>,
+}
+
 /// Build the effective [`FormatSpec`] for a field value of type `vt`, merging the locale defaults
 /// with the field's stored [`FieldFormat`] (when it does not defer to system defaults).
 pub fn field_format_spec(
@@ -32,12 +50,27 @@ pub fn field_format_spec(
     vt: FieldValueType,
     loc: &Locale,
 ) -> FormatSpec {
+    field_format_spec_with(fmt, vt, loc, &NumericConditionOverrides::default())
+}
+
+/// [`field_format_spec`], with per-row [`NumericConditionOverrides`] applied over the stored
+/// currency properties of a Number/Currency field. The overrides supersede the stored static leaf
+/// the way the engine's conditional-format formulas do; they apply only when the field does not
+/// defer to system defaults (a system-default field resolves its symbol from the locale, and the
+/// engine's behaviour for a conditioned system-default field is unverified — no corpus report
+/// authors one).
+pub fn field_format_spec_with(
+    fmt: Option<&FieldFormat>,
+    vt: FieldValueType,
+    loc: &Locale,
+    overrides: &NumericConditionOverrides,
+) -> FormatSpec {
     use FieldValueType as T;
     match vt {
         T::Int8s | T::Int16s | T::Int32s | T::Int32u | T::Number => {
-            currency_or_number(fmt, vt, loc, false)
+            currency_or_number(fmt, vt, loc, false, overrides)
         }
-        T::Currency => currency_or_number(fmt, vt, loc, true),
+        T::Currency => currency_or_number(fmt, vt, loc, true, overrides),
         T::Date => FormatSpec::Date(date_spec(fmt, loc)),
         T::Time => FormatSpec::Time(time_spec(fmt, loc)),
         // The report option "convert date-time field: to Date" (stated via the locale handle, see
@@ -121,6 +154,16 @@ fn numeric_slot(f: &FieldFormat, vt: FieldValueType) -> &rpt_model::NumericField
     } else {
         &f.numeric
     }
+}
+
+/// The conditional-format formulas bound to the numeric slot a field of type `vt` renders through —
+/// the currency slot for a Currency value, the number slot otherwise, mirroring [`numeric_slot`].
+/// Empty when the field carries no format or its slot binds none (the common case).
+pub(crate) fn numeric_condition_formulas(
+    fmt: Option<&FieldFormat>,
+    vt: FieldValueType,
+) -> &[(String, String)] {
+    fmt.map_or(&[], |f| &numeric_slot(f, vt).condition_formulas)
 }
 
 /// Whether the field shows its currency symbol only on its first printed value of each page (SDK
@@ -212,6 +255,7 @@ fn currency_or_number(
     vt: FieldValueType,
     loc: &Locale,
     symbol_by_default: bool,
+    overrides: &NumericConditionOverrides,
 ) -> FormatSpec {
     let number = numeric_spec(fmt, vt, loc);
     // Resolve whether a symbol shows, which one, and where it sits. NoSymbol on an explicit field
@@ -220,13 +264,26 @@ fn currency_or_number(
     let (show, symbol, position) = match fmt {
         Some(f) if !f.common.use_system_defaults => {
             let slot = numeric_slot(f, vt);
-            let show = slot.currency_symbol != CurrencySymbolFormat::NoSymbol;
-            let symbol = if slot.currency_symbol_text.is_empty() {
+            // A per-row override supersedes the stored property it names; each property falls back
+            // to its stored value independently.
+            let symbol_kind = overrides
+                .currency_symbol_type
+                .map_or(slot.currency_symbol, CurrencySymbolFormat::from_code);
+            let show = symbol_kind != CurrencySymbolFormat::NoSymbol;
+            let stored_text = overrides
+                .currency_symbol
+                .as_deref()
+                .unwrap_or(&slot.currency_symbol_text);
+            let symbol = if stored_text.is_empty() {
                 loc.currency_symbol.to_string()
             } else {
-                slot.currency_symbol_text.clone()
+                stored_text.to_string()
             };
-            (show, symbol, map_currency_position(slot.currency_position))
+            let position = overrides.currency_position.map_or(
+                slot.currency_position,
+                rpt_model::CurrencyPosition::from_code,
+            );
+            (show, symbol, map_currency_position(position))
         }
         _ => (
             symbol_by_default,
@@ -706,6 +763,53 @@ mod tests {
             render_value(&Value::Number(13.5044), &spec, &loc),
             " 13.50%"
         );
+    }
+
+    /// A per-row conditional override supersedes every stored currency property it names: the
+    /// Field25 shape — a stored `%`/trailing leaf (the designer's snapshot of one branch) overridden
+    /// to a floating leading `€` by the row the formulas actually evaluate on. The stored leaf is
+    /// exactly `number_field_renders_its_stored_symbol`'s, which stays valid: that case binds no
+    /// conditions.
+    #[test]
+    fn conditional_override_supersedes_the_stored_symbol() {
+        let mut fmt = explicit_fmt();
+        fmt.numeric.currency_symbol = CurrencySymbolFormat::FloatingSymbol;
+        fmt.numeric.currency_symbol_text = "%".to_string();
+        fmt.numeric.currency_position =
+            rpt_model::CurrencyPosition::TrailingCurrencyOutsideNegative;
+        let loc = Locale::from_tag("en-US");
+        let overrides = NumericConditionOverrides {
+            currency_symbol_type: Some(2),
+            currency_position: Some(1),
+            currency_symbol: Some("€".to_string()),
+        };
+        let spec = field_format_spec_with(Some(&fmt), FieldValueType::Number, &loc, &overrides);
+        assert_eq!(
+            render_value(&Value::Number(5000.0), &spec, &loc),
+            "€5,000.00"
+        );
+    }
+
+    /// Each override falls back to its stored property independently: overriding only the symbol
+    /// type to `crNoCurrencySymbol` drops the stored symbol entirely, and the empty default
+    /// overrides nothing — `field_format_spec` is exactly the empty-override resolution.
+    #[test]
+    fn conditional_override_falls_back_per_property() {
+        let mut fmt = explicit_fmt();
+        fmt.numeric.currency_symbol = CurrencySymbolFormat::FloatingSymbol;
+        fmt.numeric.currency_symbol_text = "%".to_string();
+        fmt.numeric.currency_position =
+            rpt_model::CurrencyPosition::TrailingCurrencyOutsideNegative;
+        let loc = Locale::from_tag("en-US");
+        let none_shown = NumericConditionOverrides {
+            currency_symbol_type: Some(0),
+            ..Default::default()
+        };
+        let spec = field_format_spec_with(Some(&fmt), FieldValueType::Number, &loc, &none_shown);
+        assert_eq!(render_value(&Value::Number(10.0), &spec, &loc), " 10.00");
+        let empty = NumericConditionOverrides::default();
+        let spec = field_format_spec_with(Some(&fmt), FieldValueType::Number, &loc, &empty);
+        assert_eq!(render_value(&Value::Number(10.0), &spec, &loc), " 10.00%");
     }
 
     /// A number field that stores no symbol choice never picks up the locale's currency symbol —

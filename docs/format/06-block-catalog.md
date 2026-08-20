@@ -616,8 +616,10 @@ one record type still `Unknown` corpus-wide — `0x32` in the `ReportParametersS
 A record type being *named* does not mean its whole feature is *modelled*. Full OLAP-grid / map / alert / Flash /
 XML-export structure is named at the family level but not decoded into the model, and the effective *runtime* display
 format of typed field sub-formats remains outside the decode by design (the stored format is decoded; the
-locale-resolved display value is not a stored fact, like a formula's `NumberOfBytes`). Not all object-level sub-format
-condition formulas are decoded yet. See the [support matrix](../reader/02-support-matrix.md).
+locale-resolved display value is not a stored fact, like a formula's `NumberOfBytes`). Of the object-level sub-format
+condition slots, the numeric wrapper's three currency slots (`@Currency_Symbol_Type`, `@Currency_Position_Type`,
+`@Currency_Symbol`) are decoded and applied per row; the remaining numeric slots and the other typed wrappers' slots
+are not decoded yet (no corpus report binds one). See the [support matrix](../reader/02-support-matrix.md).
 
 ## See it yourself
 

@@ -31,7 +31,7 @@ pub(in crate::build_model) fn condition_formula_bodies(
             continue;
         };
         let name = named_value(n, logical).name;
-        if is_modeled_condition(&name) {
+        if is_modeled_condition(&name) || is_modeled_numeric_condition(&name) {
             map.insert(idx, (name, body));
         }
     }
@@ -79,6 +79,20 @@ pub(crate) fn is_modeled_condition(name: &str) -> bool {
     )
 }
 
+/// The reserved conditional-format formula names this reader carries onto a numeric field format —
+/// the subset of the `0x00f9` wrapper's fourteen slots with wire evidence (a real report binding a
+/// formula to them): the currency symbol's presence, position and text. The remaining eleven are
+/// deliberately not carried until a corpus report binds one; a guessed reserved name that never
+/// matches is dead vocabulary that looks like coverage. Kept separate from
+/// [`is_modeled_condition`]: that set gates the object/section/font/border wrappers, and neither
+/// vocabulary may leak into the other's owner records.
+pub(crate) fn is_modeled_numeric_condition(name: &str) -> bool {
+    matches!(
+        name,
+        "Currency_Symbol_Type" | "Currency_Position_Type" | "Currency_Symbol"
+    )
+}
+
 /// The conditional-format formula references a condition wrapper's slots name, in slot order: a
 /// slot's `@`-name with the `@` stripped, paired with the index that picks the formula's body.
 ///
@@ -92,6 +106,21 @@ pub(crate) fn condition_slots(row: &Row) -> Vec<(String, usize)> {
                 let name = text.strip_prefix('@')?;
                 let index = usize::from((*index)?);
                 is_modeled_condition(name).then(|| (name.to_owned(), index))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`condition_slots`], in the numeric field format's vocabulary: the occupied slots of a `0x00f9`
+/// wrapper whose names are modeled numeric conditions (see [`is_modeled_numeric_condition`]).
+pub(crate) fn condition_slots_numeric(row: &Row) -> Vec<(String, usize)> {
+    row.iter()
+        .filter_map(|(_, v)| match v {
+            Cell::Ref { text, index, .. } => {
+                let name = text.strip_prefix('@')?;
+                let index = usize::from((*index)?);
+                is_modeled_numeric_condition(name).then(|| (name.to_owned(), index))
             }
             _ => None,
         })

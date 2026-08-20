@@ -303,6 +303,17 @@ pub struct NumericFieldFormat {
     pub thousand_symbol: String,
     /// SDK `CurrencySymbol` — the currency symbol string (e.g. `"kr "`); empty when there is none.
     pub currency_symbol_text: String,
+    /// Conditional-format formulas attached to this numeric format, as `(reserved formula name,
+    /// formula text)` pairs in record order (e.g. `("Currency_Symbol", "…")`). The key is the
+    /// stored Crystal reserved formula name, not any output-surface attribute name. Carried by the
+    /// wrapping `0x00f9` record — each of a field's two numeric slots (currency, number) has its
+    /// own wrapper, so the two slots carry independent condition sets. A bound formula supersedes
+    /// the stored static property per evaluated row.
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip_serializing_if = "Vec::is_empty", default)
+    )]
+    pub condition_formulas: Vec<(String, String)>,
 }
 
 impl Default for NumericFieldFormat {
@@ -325,6 +336,7 @@ impl Default for NumericFieldFormat {
             decimal_symbol: String::new(),
             thousand_symbol: String::new(),
             currency_symbol_text: String::new(),
+            condition_formulas: Vec::new(),
         }
     }
 }

@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 WIP.
 
+- The numeric field format's conditional-format formulas are decoded and applied per row: the `0x00f9` wrapper's
+  three currency condition slots (`@Currency_Symbol_Type`, `@Currency_Position_Type`, `@Currency_Symbol`) land on
+  `NumericFieldFormat::condition_formulas` for the slot the wrapper decorates, and the layout engine evaluates them
+  against each record, superseding the stored static symbol/placement the way the native engine does. A field whose
+  stored leaf snapshots one branch of a condition (e.g. a trailing `%`) now prints the branch the row actually takes
+  (e.g. a leading `€`). A formula that fails to parse or evaluate, or yields the wrong type, leaves that one property
+  at its stored value.
+
 ## [0.4.0]
 
 More than 340 tracked issues went into this release.
