@@ -5,7 +5,10 @@
 //! `{…}` references get per-reference substitution. The display format is resolved by
 //! [`crate::format`], merging the render locale with the field's stored `FieldFormat` leaf.
 
-use crate::format::{field_format_spec, render_value, render_value_default};
+use crate::format::{
+    field_format_spec_with, numeric_condition_formulas, render_value, render_value_default,
+    NumericConditionOverrides,
+};
 use crate::{push_diag, DiagSink};
 use rpt_data::{
     DataContext, FormulaRegistry, Row, RunningTotals, ScheduledValues, SharedState, Summary,
@@ -254,7 +257,13 @@ pub(crate) fn field_text_marked(
     }
     let value = field_value(report, obj, ctx, state, diag);
     let value_type = field_object_value_type(report, obj);
-    let spec = field_format_spec(obj.format.as_ref(), value_type, loc);
+    // The numeric slot's own conditional-format formulas supersede its stored currency properties
+    // per row; a field whose slot binds none (the common case) resolves exactly as before.
+    let overrides = numeric_condition_overrides(
+        numeric_condition_formulas(obj.format.as_ref(), value_type),
+        ctx,
+    );
+    let spec = field_format_spec_with(obj.format.as_ref(), value_type, loc, &overrides);
     let text = render_value(&value, &spec, loc);
     let mark = match (&value, &spec) {
         // A spec with no symbol to blank is not marked, so the pass never has to consider one.
@@ -410,6 +419,14 @@ pub mod cond {
     pub const FONT_COLOR: &str = "Font_Color";
     /// Object visibility / suppress flag (`@Object_Visibility`).
     pub const OBJECT_VISIBILITY: &str = "Object_Visibility";
+    /// A numeric format's currency-symbol presence (`@Currency_Symbol_Type`, a
+    /// `CurrencySymbolFormat` ordinal).
+    pub const CURRENCY_SYMBOL_TYPE: &str = "Currency_Symbol_Type";
+    /// A numeric format's currency-symbol placement (`@Currency_Position_Type`, a
+    /// `CurrencyPosition` ordinal).
+    pub const CURRENCY_POSITION_TYPE: &str = "Currency_Position_Type";
+    /// A numeric format's currency-symbol text (`@Currency_Symbol`).
+    pub const CURRENCY_SYMBOL: &str = "Currency_Symbol";
     /// Section visibility / suppress flag (`@Section_Visibility`).
     pub const SECTION_VISIBILITY: &str = "Section_Visibility";
     /// A section's own background-fill color, stored under one of several reserved names across
@@ -464,6 +481,63 @@ pub fn cond_bool(
     match result.ok()? {
         Value::Bool(b) => Some(b),
         _ => None,
+    }
+}
+
+/// Evaluate a named conditional-format formula to a finite number (e.g. a numeric format's
+/// `@Currency_Symbol_Type`, whose `cr…` constants are plain numbers to the formula engine). `None`
+/// when there is no context, no such formula, a failed parse/eval, a non-`Number` result, or a
+/// non-finite one — the caller keeps the stored static value, so a broken formula degrades to the
+/// designer's snapshot rather than failing the render.
+pub fn cond_number(
+    conditions: &[(String, String)],
+    key: &str,
+    ctx: Option<&DataContext>,
+) -> Option<f64> {
+    let ctx = ctx?;
+    let body = conditions.iter().find(|(k, _)| k == key).map(|(_, b)| b)?;
+    let ast = parse_cached(body);
+    match rpt_formula::eval::eval(&ast.node, ctx).ok()? {
+        Value::Number(n) if n.is_finite() => Some(n),
+        _ => None,
+    }
+}
+
+/// Evaluate a named conditional-format formula to a string (e.g. a numeric format's
+/// `@Currency_Symbol`). `None` when there is no context, no such formula, a failed parse/eval, or a
+/// non-`Str` result — deliberately not coercing, so a symbol formula that accidentally evaluates to
+/// a number keeps the stored symbol text rather than printing a digit where a currency mark belongs.
+pub fn cond_string(
+    conditions: &[(String, String)],
+    key: &str,
+    ctx: Option<&DataContext>,
+) -> Option<String> {
+    let ctx = ctx?;
+    let body = conditions.iter().find(|(k, _)| k == key).map(|(_, b)| b)?;
+    let ast = parse_cached(body);
+    match rpt_formula::eval::eval(&ast.node, ctx).ok()? {
+        Value::Str(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// Evaluate a numeric slot's three modeled currency condition formulas in the current record
+/// context. Each slot that is unbound, or whose formula fails or yields the wrong type, stays
+/// `None` — that property falls back to the stored static value independently of the others. The
+/// two ordinal formulas are rounded to the nearest integer, not truncated: a body whose arithmetic
+/// lands on 1.9999 means ordinal 2.
+pub(crate) fn numeric_condition_overrides(
+    conditions: &[(String, String)],
+    ctx: Option<&DataContext>,
+) -> NumericConditionOverrides {
+    if conditions.is_empty() {
+        return NumericConditionOverrides::default();
+    }
+    let ordinal = |key| cond_number(conditions, key, ctx).map(|n| n.round() as i32);
+    NumericConditionOverrides {
+        currency_symbol_type: ordinal(cond::CURRENCY_SYMBOL_TYPE),
+        currency_position: ordinal(cond::CURRENCY_POSITION_TYPE),
+        currency_symbol: cond_string(conditions, cond::CURRENCY_SYMBOL, ctx),
     }
 }
 
@@ -1342,6 +1416,96 @@ mod tests {
         assert_eq!(
             render(Some(G::Monthly), Value::Str("East".into())),
             ("East".into(), "East".into())
+        );
+    }
+
+    /// The three currency condition formulas of the one real-world case with wire evidence
+    /// (a v8 policy schedule's SUMS INSURED column): the designer's stored leaf snapshots the
+    /// permanent-disability branch (`%`, trailing), and the formulas supersede it per row.
+    fn currency_conditions() -> Vec<(String, String)> {
+        vec![
+            (
+                cond::CURRENCY_SYMBOL_TYPE.to_string(),
+                "if {t.sum} = 0 then crNoCurrencySymbol else crFloatingCurrencySymbol".to_string(),
+            ),
+            (
+                cond::CURRENCY_POSITION_TYPE.to_string(),
+                "if {t.section} = \"PERMANENT DISABILITY SCALE\" and {t.sum} <> 0 then 3 else 1"
+                    .to_string(),
+            ),
+            (
+                cond::CURRENCY_SYMBOL.to_string(),
+                "if {t.section} = \"PERMANENT DISABILITY SCALE\" and {t.sum} <> 0 then \"%\" else \"€\""
+                    .to_string(),
+            ),
+        ]
+    }
+
+    fn condition_row(sum: f64, section: &str) -> Row {
+        let mut r = Row::default();
+        r.insert("t.sum", Value::Number(sum));
+        r.insert("t.section", Value::Str(section.to_string()));
+        r
+    }
+
+    /// The overrides are a per-row resolution: the same condition set yields the euro branch on an
+    /// accident row and the percent branch on a disability row. No fixture report in this corpus
+    /// binds a `0x00f9` slot, so the end-to-end path is covered here with the real-world bodies
+    /// rather than through a golden report.
+    #[test]
+    fn numeric_condition_overrides_resolve_per_row() {
+        let formulas = FormulaRegistry::new();
+        let conditions = currency_conditions();
+
+        let accident = condition_row(5000.0, "PERSONAL ACCIDENT");
+        let ctx = DataContext::new(&accident, &formulas);
+        assert_eq!(
+            numeric_condition_overrides(&conditions, Some(&ctx)),
+            NumericConditionOverrides {
+                currency_symbol_type: Some(2),
+                currency_position: Some(1),
+                currency_symbol: Some("€".to_string()),
+            }
+        );
+
+        let disability = condition_row(5000.0, "PERMANENT DISABILITY SCALE");
+        let ctx = DataContext::new(&disability, &formulas);
+        assert_eq!(
+            numeric_condition_overrides(&conditions, Some(&ctx)),
+            NumericConditionOverrides {
+                currency_symbol_type: Some(2),
+                currency_position: Some(3),
+                currency_symbol: Some("%".to_string()),
+            }
+        );
+    }
+
+    /// Every failure mode degrades to `None` — the stored static value — rather than failing the
+    /// render: no record context, an unparseable body, and a result of the wrong type (the string
+    /// helper deliberately does not coerce a number, so a broken symbol formula cannot print a
+    /// digit where a currency mark belongs).
+    #[test]
+    fn cond_number_and_string_fail_open() {
+        let formulas = FormulaRegistry::new();
+        let conditions = currency_conditions();
+        assert_eq!(
+            numeric_condition_overrides(&conditions, None),
+            NumericConditionOverrides::default()
+        );
+
+        let row = condition_row(1.0, "X");
+        let ctx = DataContext::new(&row, &formulas);
+        let broken = vec![
+            (cond::CURRENCY_SYMBOL_TYPE.to_string(), "if (".to_string()),
+            (
+                cond::CURRENCY_POSITION_TYPE.to_string(),
+                "\"three\"".to_string(),
+            ),
+            (cond::CURRENCY_SYMBOL.to_string(), "42".to_string()),
+        ];
+        assert_eq!(
+            numeric_condition_overrides(&broken, Some(&ctx)),
+            NumericConditionOverrides::default()
         );
     }
 }

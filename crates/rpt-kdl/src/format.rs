@@ -261,6 +261,7 @@ fn numeric_node(name: &str, nf: &NumericFieldFormat) -> Option<Node> {
         decimal_symbol,
         thousand_symbol,
         currency_symbol_text,
+        condition_formulas,
     } = nf;
     Some(
         Node::new(name)
@@ -302,7 +303,8 @@ fn numeric_node(name: &str, nf: &NumericFieldFormat) -> Option<Node> {
             .str_if("zero-value", zero_value_string)
             .str_if("decimal-symbol", decimal_symbol)
             .str_if("thousand-symbol", thousand_symbol)
-            .str_if("currency-text", currency_symbol_text),
+            .str_if("currency-text", currency_symbol_text)
+            .children(condition_formula_nodes(condition_formulas)),
     )
 }
 

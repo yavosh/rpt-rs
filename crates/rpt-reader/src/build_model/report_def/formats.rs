@@ -173,6 +173,9 @@ pub(crate) fn decode_numeric_format(row: &Row) -> crate::model::NumericFieldForm
         use_lead_zero: row.i("leading_zero") != 0,
         display_reverse_sign: row.i("reverse_sign") != 0,
         one_currency_symbol_per_page: row.i("one_currency_symbol_per_page") != 0,
+        // The record's own bytes carry no formulas; the wrapping `0x00f9`'s slots do, and the
+        // caller assigns them onto the slot the wrapper decorates.
+        condition_formulas: Vec::new(),
         zero_value_string: row.text("zero_value_string").to_owned(),
         decimal_symbol: row.text("decimal_symbol").to_owned(),
         thousand_symbol: row.text("thousand_symbol").to_owned(),
@@ -322,12 +325,15 @@ pub(crate) fn decode_boolean_format(row: &Row) -> crate::model::BooleanFieldForm
 /// fills. The numeric child streams twice
 /// per field — the currency-format slot first, then the number-format slot — and
 /// `currency_slot_pending` is what tells the two apart; the number slot is the reported value for a
-/// non-currency field, so it also overwrites the first.
+/// non-currency field, so it also overwrites the first. `numeric_conditions` is the wrapping
+/// `0x00f9` record's own resolved condition formulas, carried onto the numeric format it wraps —
+/// each streaming of the child has its own wrapper, so the two slots take independent sets.
 pub(super) fn apply_field_format_child(
     child: &RecordNode,
     logical: &[u8],
     ff: &mut crate::model::FieldFormat,
     currency_slot_pending: &mut bool,
+    numeric_conditions: Vec<(String, String)>,
 ) {
     let Some(table) = field_format_table(child.rtype) else {
         return;
@@ -336,7 +342,8 @@ pub(super) fn apply_field_format_child(
     match child.rtype {
         COMMON_FIELD_FORMAT => ff.common = decode_common_format(&row),
         NUMERIC_FIELD_FORMAT => {
-            let nf = decode_numeric_format(&row);
+            let mut nf = decode_numeric_format(&row);
+            nf.condition_formulas = numeric_conditions;
             if *currency_slot_pending {
                 ff.currency_numeric = nf.clone();
                 *currency_slot_pending = false;

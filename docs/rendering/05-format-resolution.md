@@ -1,11 +1,20 @@
 # Format resolution
 
-A field's displayed value is resolved from **two layers** (see `rpt-layout`'s format module):
+A field's displayed value is resolved from **three layers** (see `rpt-layout`'s format module):
 
 1. the **locale** — the "system default" layer: separators, month/day names, AM/PM, default date order, default
-   decimals, currency symbol; and
+   decimals, currency symbol;
 2. the field's **stored `FieldFormat`** record — the explicit authoring choices (decimals, negative style, currency
-   symbol placement, date component forms, boolean word pair).
+   symbol placement, date component forms, boolean word pair); and
+3. the numeric format's **conditional-format formulas** — the `0x00f9` wrapper's bound condition slots, evaluated
+   **per row** against the record context. A bound formula supersedes the stored static property for the row being
+   rendered; the stored value is the designer's snapshot of one branch, so a report whose data never takes that
+   branch prints something other than what the leaf stores. The modelled slots are the three with wire evidence —
+   `@Currency_Symbol_Type` (a `CurrencySymbolFormat` ordinal, `crNoCurrencySymbol`/`crFloatingCurrencySymbol` resolve
+   to plain numbers), `@Currency_Position_Type` (a `CurrencyPosition` ordinal) and `@Currency_Symbol` (the symbol
+   text). Each slot falls back to the stored value independently when its formula fails to parse or evaluate, or
+   yields the wrong type; the override applies only to an explicit (non-system-default) field, and only a field
+   object applies it (an embedded text-object run carries no format record at all).
 
 The field's own `use_system_defaults` flag arbitrates: when set, the locale supplies the effective format; otherwise the
 stored record wins for the attributes it sets, with names/separators still coming from the locale (Crystal never stores
