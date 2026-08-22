@@ -11,6 +11,7 @@ members = [
     "crates/rpt-pages",
     "crates/rpt-format-value",
     "crates/rpt-data",
+    "crates/rpt-inputs",
     "crates/rpt-query",
     "crates/rpt-layout",
     "crates/rpt-text",
@@ -85,6 +86,7 @@ rpt-json = { path = "crates/rpt-json" }
 rpt-pages = { path = "crates/rpt-pages" }
 rpt-format-value = { path = "crates/rpt-format-value" }
 rpt-data = { path = "crates/rpt-data" }
+rpt-inputs = { path = "crates/rpt-inputs" }
 rpt-query = { path = "crates/rpt-query" }
 rpt-db-postgres = { path = "crates/rpt-db-postgres" }
 rpt-db-sqlite = { path = "crates/rpt-db-sqlite" }

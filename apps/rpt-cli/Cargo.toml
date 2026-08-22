@@ -19,6 +19,8 @@ path = "src/main.rs"
 # `serde` enables the model's serde derives, used by the `json-dump` export.
 rpt-reader = { workspace = true, features = ["serde"] }
 rpt-query.workspace = true
+# The `inputs` listing names each parameter's type with the same mapping the renderer coerces by.
+rpt-inputs.workspace = true
 rpt-kdl.workspace = true
 rpt-json.workspace = true
 # The formula checker (`rpt formulas`) parses and validates formula bodies. The engine is standalone —

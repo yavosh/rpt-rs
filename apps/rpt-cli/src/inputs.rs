@@ -23,18 +23,11 @@ OPTIONS:
     --json    emit the parameter list as JSON
 ";
 
-/// The friendly value-type name of a parameter input (the data type the caller must supply).
+/// The friendly value-type name of a parameter input (the data type the caller must supply). Shared
+/// with the renderer's coercion, so the type this listing promises is the type a supplied value is
+/// actually parsed as.
 fn input_type(kind: ParameterValueKind) -> &'static str {
-    use ParameterValueKind as Vk;
-    match kind {
-        Vk::NumberParameter => "Number",
-        Vk::CurrencyParameter => "Currency",
-        Vk::BooleanParameter => "Boolean",
-        Vk::DateParameter => "Date",
-        Vk::TimeParameter => "Time",
-        Vk::DateTimeParameter => "DateTime",
-        _ => "String",
-    }
+    rpt_inputs::params::kind_name(kind)
 }
 
 /// One stored parameter value as text: a discrete value verbatim, a range in interval notation

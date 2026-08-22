@@ -89,6 +89,16 @@ impl RenderError {
     }
 }
 
+/// The input library states the same failure this CLI already reports as [`RenderError::Params`], so
+/// it maps onto that variant rather than adding a second parameter-error spelling.
+impl From<rpt_inputs::InputsError> for RenderError {
+    fn from(e: rpt_inputs::InputsError) -> RenderError {
+        match e {
+            rpt_inputs::InputsError::Params(msg) => RenderError::Params(msg),
+        }
+    }
+}
+
 #[cfg(feature = "db-postgres")]
 impl From<rpt_db_postgres::DbError> for RenderError {
     fn from(e: rpt_db_postgres::DbError) -> RenderError {

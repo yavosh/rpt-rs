@@ -1089,6 +1089,7 @@ version = "0.4.0"
 dependencies = [
  "kdl",
  "rpt-formula",
+ "rpt-inputs",
  "rpt-json",
  "rpt-kdl",
  "rpt-query",
@@ -1145,6 +1146,16 @@ name = "rpt-formula"
 version = "0.4.0"
 dependencies = [
  "rpt-format-value",
+]
+
+[[package]]
+name = "rpt-inputs"
+version = "0.4.0"
+dependencies = [
+ "rpt-data",
+ "rpt-formula",
+ "rpt-model",
+ "thiserror",
 ]
 
 [[package]]
@@ -1253,6 +1264,7 @@ dependencies = [
  "rpt-db-postgres",
  "rpt-db-sqlite",
  "rpt-formula",
+ "rpt-inputs",
  "rpt-pages",
  "rpt-query",
  "rpt-reader",
